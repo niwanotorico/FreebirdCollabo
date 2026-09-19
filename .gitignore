@@ -1,0 +1,31 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+
+# --- Node / Cloudflare Workers ---
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+
+# --- サードパーティ製バイナリ（55MB。公式から再DL可能） ---
+relay/cloudflared.exe
+*.exe
+
+# --- ビルド生成物・配布zip（配布はGitHub Releases等で） ---
+*.zip
+Claude outputs/
+
+# --- Blender 一時ファイル ---
+*.blend1
+*.blend2
+
+# --- OS / エディタ ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.log
+*.tmp
