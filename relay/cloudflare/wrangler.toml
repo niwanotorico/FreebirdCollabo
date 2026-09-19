@@ -1,0 +1,12 @@
+name = "freebird-relay"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# Free plan requires the SQLite-backed Durable Object class.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
