@@ -21,8 +21,12 @@ import bpy
 
 MAX_MESH_VERTS = 100_000  # live (Edit Mode) re-sync limit
 MAX_MESH_VERTS_ADD = 300_000  # one-shot obj_add limit (GLB imports are often big)
-SUPPORTED = {"MESH", "CURVE", "FONT", "LIGHT", "CAMERA", "EMPTY"}
+MAX_GP_POINTS = 100_000  # live Grease Pencil re-sync limit
+MAX_GP_POINTS_ADD = 300_000  # one-shot obj_add limit
+SUPPORTED = {"MESH", "CURVE", "FONT", "LIGHT", "CAMERA", "EMPTY", "GREASEPENCIL"}
 AS_EVALUATED_MESH = {"SURFACE", "META"}  # no Python API to rebuild these; ship their evaluated mesh instead
+
+_GP_CURVE_TYPES = {0: "CATMULL_ROM", 1: "POLY", 2: "BEZIER", 3: "NURBS"}
 
 
 def _vec(v):
@@ -60,6 +64,8 @@ def quick_digest(ob):
         mi = array.array("i", bytes(np * 4))
         me.polygons.foreach_get("material_index", mi)
         return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes())
+    if kind == "GREASEPENCIL":
+        return _grease_pencil_digest(ob.data)
     payload = serialize(ob)  # other types are tiny; hashing the payload is cheap
     return _digest_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":"))) if payload else None
 
@@ -83,6 +89,116 @@ def _mesh_data(me, limit=MAX_MESH_VERTS):
         data["uv"] = [round(x, 5) for x in buf]  # per loop, same loop order from_pydata recreates
         data["uvn"] = uv.name
     return data
+
+
+def _grease_pencil_digest(gp):
+    """Fast fingerprint without building the full point-by-point JSON payload."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(str(gp.stroke_depth_order).encode())
+    total = 0
+    for layer in gp.layers:
+        h.update(json.dumps(_gp_layer_settings(layer), sort_keys=True, separators=(",", ":")).encode())
+        for frame in layer.frames:
+            drawing = frame.drawing
+            sizes = [len(stroke.points) for stroke in drawing.strokes]
+            total += sum(sizes)
+            if total > MAX_GP_POINTS:
+                return None
+            h.update(str((frame.frame_number, frame.keyframe_type, sizes)).encode())
+            for stroke in drawing.strokes:
+                h.update(json.dumps(_gp_stroke_settings(stroke), sort_keys=True, separators=(",", ":")).encode())
+            # Point values dominate payload size. foreach_get keeps this check in C.
+            n_points = sum(sizes)
+            for name, prop, width, default in (
+                ("position", "vector", 3, (0.0, 0.0, 0.0)),
+                ("radius", "value", 1, (0.01,)),
+                ("opacity", "value", 1, (1.0,)),
+                ("rotation", "value", 1, (0.0,)),
+                ("vertex_color", "color", 4, (0.0, 0.0, 0.0, 0.0)),
+                ("delta_time", "value", 1, (0.0,)),
+                ("handle_left", "vector", 3, (0.0, 0.0, 0.0)),
+                ("handle_right", "vector", 3, (0.0, 0.0, 0.0)),
+            ):
+                attr = drawing.attributes.get(name)
+                if attr is not None:
+                    values = array.array("f", bytes(len(attr.data) * width * 4))
+                    attr.data.foreach_get(prop, values)
+                else:
+                    values = array.array("f", default * n_points)
+                h.update(name.encode())
+                h.update(values.tobytes())
+    return h.hexdigest()
+
+
+def _gp_layer_settings(layer):
+    return {
+        "name": layer.name,
+        "hide": layer.hide,
+        "lock": layer.lock,
+        "opacity": round(float(layer.opacity), 5),
+        "blend_mode": layer.blend_mode,
+        "tint_color": _vec(layer.tint_color),
+        "tint_factor": round(float(layer.tint_factor), 5),
+        "use_lights": layer.use_lights,
+        "use_onion_skinning": layer.use_onion_skinning,
+        "translation": _vec(layer.translation),
+        "rotation": _vec(layer.rotation),
+        "scale": _vec(layer.scale),
+    }
+
+
+def _gp_stroke_settings(stroke):
+    return {
+        "curve_type": int(stroke.curve_type),
+        "cyclic": stroke.cyclic,
+        "material_index": stroke.material_index,
+        "softness": round(float(stroke.softness), 5),
+        "aspect_ratio": round(float(stroke.aspect_ratio), 5),
+        "fill_color": [round(float(x), 5) for x in stroke.fill_color],
+        "fill_opacity": round(float(stroke.fill_opacity), 5),
+        "fill_id": getattr(stroke, "fill_id", 0),
+        "hide_stroke": getattr(stroke, "hide_stroke", False),
+    }
+
+
+def _gp_point_data(point):
+    item = {
+        "co": _vec(point.position),
+        "radius": round(float(point.radius), 5),
+        "opacity": round(float(point.opacity), 5),
+        "rotation": round(float(point.rotation), 5),
+        "color": [round(float(x), 5) for x in point.vertex_color],
+        "time": round(float(point.delta_time), 5),
+    }
+    if point.handle_left is not None and point.handle_right is not None:
+        item["hl"] = _vec(point.handle_left.position)
+        item["hr"] = _vec(point.handle_right.position)
+    return item
+
+
+def _grease_pencil_data(gp, limit=MAX_GP_POINTS):
+    layers = []
+    total = 0
+    for layer in gp.layers:
+        layer_item = _gp_layer_settings(layer)
+        layer_item["frames"] = []
+        for frame in layer.frames:
+            strokes = []
+            for stroke in frame.drawing.strokes:
+                total += len(stroke.points)
+                if total > limit:
+                    return None
+                item = _gp_stroke_settings(stroke)
+                item["points"] = [_gp_point_data(point) for point in stroke.points]
+                strokes.append(item)
+            layer_item["frames"].append({
+                "number": frame.frame_number,
+                "keyframe_type": frame.keyframe_type,
+                "strokes": strokes,
+            })
+        layers.append(layer_item)
+    active = gp.layers.active.name if gp.layers.active else None
+    return {"layers": layers, "active": active, "stroke_depth_order": gp.stroke_depth_order}
 
 
 def serialize(ob, limit=MAX_MESH_VERTS):
@@ -136,6 +252,11 @@ def serialize(ob, limit=MAX_MESH_VERTS):
         data = {"type": cam.type, "lens": cam.lens, "ortho_scale": cam.ortho_scale, "clip_start": cam.clip_start, "clip_end": cam.clip_end}
     elif kind == "EMPTY":
         data = {"display_type": ob.empty_display_type, "display_size": ob.empty_display_size}
+    elif kind == "GREASEPENCIL":
+        gp_limit = MAX_GP_POINTS_ADD if limit == MAX_MESH_VERTS_ADD else MAX_GP_POINTS
+        data = _grease_pencil_data(ob.data, gp_limit)
+        if data is None:
+            return None
     else:
         return None
     return {"type": kind, "data": data}
@@ -159,6 +280,8 @@ def new_object(name, payload):
         data = bpy.data.cameras.new(name)
     elif kind == "EMPTY":
         data = None
+    elif kind == "GREASEPENCIL":
+        data = bpy.data.grease_pencils.new(name)
     else:
         raise ValueError(f"unsupported object type: {kind}")
     ob = bpy.data.objects.new(name, data)
@@ -234,7 +357,56 @@ def apply(ob, payload):
     elif kind == "EMPTY":
         ob.empty_display_type = data["display_type"]
         ob.empty_display_size = data["display_size"]
+    elif kind == "GREASEPENCIL":
+        _apply_grease_pencil(ob.data, data)
     return True
+
+
+def _apply_grease_pencil(gp, data):
+    """Rebuild drawings in the existing datablock so slots and object settings survive."""
+    for layer in list(gp.layers):
+        gp.layers.remove(layer)
+    created = {}
+    for layer_item in data.get("layers", []):
+        layer = gp.layers.new(layer_item["name"], set_active=False)
+        created[layer.name] = layer
+        for key in ("hide", "lock", "opacity", "blend_mode", "tint_color", "tint_factor",
+                    "use_lights", "use_onion_skinning", "translation", "rotation", "scale"):
+            if key in layer_item:
+                setattr(layer, key, layer_item[key])
+        for frame_item in layer_item.get("frames", []):
+            frame = layer.frames.new(frame_item["number"])
+            frame.keyframe_type = frame_item.get("keyframe_type", "KEYFRAME")
+            drawing = frame.drawing
+            strokes = frame_item.get("strokes", [])
+            if strokes:
+                drawing.add_strokes([len(item.get("points", [])) for item in strokes])
+            for index, item in enumerate(strokes):
+                curve_type = _GP_CURVE_TYPES.get(int(item.get("curve_type", 0)), "POLY")
+                if curve_type != "POLY":
+                    drawing.set_types(type=curve_type, indices=[index])
+                stroke = drawing.strokes[index]
+                for key in ("cyclic", "material_index", "softness", "aspect_ratio", "fill_color",
+                            "fill_opacity", "fill_id", "hide_stroke"):
+                    if key in item and hasattr(stroke, key):
+                        setattr(stroke, key, item[key])
+                for point, point_item in zip(stroke.points, item.get("points", [])):
+                    point.position = point_item["co"]
+                    point.radius = point_item.get("radius", 0.01)
+                    point.opacity = point_item.get("opacity", 1.0)
+                    point.rotation = point_item.get("rotation", 0.0)
+                    point.vertex_color = point_item.get("color", (0.0, 0.0, 0.0, 0.0))
+                    point.delta_time = point_item.get("time", 0.0)
+                    if point.handle_left is not None and "hl" in point_item:
+                        point.handle_left.position = point_item["hl"]
+                    if point.handle_right is not None and "hr" in point_item:
+                        point.handle_right.position = point_item["hr"]
+    active = created.get(data.get("active"))
+    if active is not None:
+        gp.layers.active = active
+    if "stroke_depth_order" in data:
+        gp.stroke_depth_order = data["stroke_depth_order"]
+    gp.update_tag()
 
 
 def payload_bytes(payload):
@@ -331,6 +503,19 @@ def serialize_materials(ob):
             out.append(None)
             continue
         item = {"n": m.name, "c": _base_color(m)}
+        if m.is_grease_pencil and m.grease_pencil is not None:
+            gp = m.grease_pencil
+            item["gp"] = {
+                "color": [round(float(x), 5) for x in gp.color],
+                "fill_color": [round(float(x), 5) for x in gp.fill_color],
+                "mode": gp.mode,
+                "stroke_style": gp.stroke_style,
+                "fill_style": gp.fill_style,
+                "alignment_mode": gp.alignment_mode,
+                "use_overlap_strokes": gp.use_overlap_strokes,
+                "use_stroke_holdout": gp.use_stroke_holdout,
+                "use_fill_holdout": gp.use_fill_holdout,
+            }
         img = _base_color_image(m)
         if img is not None:
             got = image_bytes(img)
@@ -412,7 +597,14 @@ def apply_materials(ob, mats):
         mat = bpy.data.materials.get(item["n"])
         if mat is None:
             mat = bpy.data.materials.new(item["n"])
-            mat.use_nodes = True
+        gp_data = item.get("gp")
+        if gp_data and not mat.is_grease_pencil:
+            bpy.data.materials.create_gpencil_data(mat)
+        if gp_data and mat.grease_pencil is not None:
+            style = mat.grease_pencil
+            for key, value in gp_data.items():
+                if hasattr(style, key):
+                    setattr(style, key, value)
         col = item.get("c")
         node = _principled(mat)
         if col and len(col) == 4:
