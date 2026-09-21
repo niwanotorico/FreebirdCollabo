@@ -414,17 +414,55 @@ def payload_bytes(payload):
 
 
 # ----------------------------------------------------------------------
-# materials (MVP: slot name + Base Color value + Base Color image texture; no other PBR inputs)
+# materials
+#   A material travels as one small "state" dict (serialize_material). The same dict is used
+#   inline in obj_add["mats"] and standalone in the live "mat" message (Issue #2):
+#     n      name                      c    viewport colour (= Base Color value when unlinked)
+#     vm/vr  viewport metallic/roughness    rm / bc  surface_render_method / backface culling
+#     p      {socket identifier: value}  unlinked Principled BSDF inputs (float / colour / vector)
+#     tex    Base Color image texture    tx   {socket identifier: texture} for the other inputs
+#     l      inputs driven by something we do not sync (procedural nodes...) -> receiver leaves them alone
+#     gp     Grease Pencil style
+#   Arbitrary node graphs are NOT synced (non-goal); images themselves travel separately (img / img_need).
 # ----------------------------------------------------------------------
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
+TEX_INPUTS = ("Base Color", "Metallic", "Roughness", "Alpha", "Normal", "Emission Color")
+_GP_STYLE_KEYS = ("color", "fill_color", "mode", "stroke_style", "fill_style", "alignment_mode",
+                  "use_overlap_strokes", "use_stroke_holdout", "use_fill_holdout")
+_MAT_SETTINGS = (("rm", "surface_render_method"), ("bc", "use_backface_culling"))
 
 
 def _principled(mat):
-    if mat.use_nodes and mat.node_tree:
-        for n in mat.node_tree.nodes:
+    tree = getattr(mat, "node_tree", None)  # (Material.use_nodes is deprecated in 5.x; node_tree is None when off)
+    if tree is not None:
+        for n in tree.nodes:
             if n.type == "BSDF_PRINCIPLED":
                 return n
     return None
+
+
+def _ensure_principled(mat):
+    """Principled BSDF of a material we are about to write to; builds the default tree if there is none."""
+    node = _principled(mat)
+    if node is not None or mat.is_grease_pencil:
+        return node
+    if mat.node_tree is None:
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                mat.use_nodes = True
+            except Exception:
+                return None
+        node = _principled(mat)
+    if node is None and mat.node_tree is not None and not len(mat.node_tree.nodes):
+        tree = mat.node_tree
+        node = tree.nodes.new("ShaderNodeBsdfPrincipled")
+        out = tree.nodes.new("ShaderNodeOutputMaterial")
+        out.location = (300, 0)
+        tree.links.new(node.outputs[0], out.inputs[0])
+    return node  # a material built around another shader stays as it is
 
 
 def _base_color(mat):
@@ -437,13 +475,9 @@ def _base_color(mat):
     return [round(float(c), 4) for c in mat.diffuse_color]
 
 
-def _base_color_image(mat):
-    """Image node feeding Base Color, searching breadth-first through intermediate nodes
-    (Mix with a vertex colour, gamma, separate/combine, node groups...), or None."""
-    n = _principled(mat)
-    if n is None:
-        return None
-    sock = n.inputs["Base Color"]
+def _image_node(sock):
+    """Image Texture node feeding a socket, searching breadth-first through intermediate nodes
+    (Mix with a vertex colour, gamma, normal map, separate/combine, node groups...), or None."""
     if not sock.is_linked:
         return None
     queue = [sock.links[0].from_node]
@@ -454,13 +488,19 @@ def _base_color_image(mat):
             continue
         seen.add(node.name)
         if node.type == "TEX_IMAGE" and node.image is not None:
-            return node.image
+            return node
         if len(seen) > 12:
             break
         for inp in node.inputs:
             for link in inp.links:
                 queue.append(link.from_node)
     return None
+
+
+def _base_color_image(mat):
+    n = _principled(mat)
+    node = _image_node(n.inputs["Base Color"]) if n is not None else None
+    return node.image if node is not None else None
 
 
 def image_bytes(img):
@@ -492,52 +532,160 @@ def image_id(data):
     return hashlib.sha1(data).hexdigest()
 
 
+_tex_cache = {}  # image name -> (signature, tex dict | None): materials are re-digested often, images are big
+
+
+def _image_signature(img):
+    try:
+        if img.packed_file is not None:
+            return ("packed", img.packed_file.size)
+        path = bpy.path.abspath(img.filepath_raw or img.filepath)
+        st = os.stat(path)
+        return (path, st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+
+
+def _tex_ref(img):
+    """{"id", "name", "ext", "cs"} for an image whose bytes we can ship, else None."""
+    sig = _image_signature(img)
+    if sig is None:
+        return None
+    hit = _tex_cache.get(img.name)
+    if hit is None or hit[0] != sig:
+        got = image_bytes(img)
+        hit = (sig, {"id": image_id(got[0]), "ext": got[1]} if got else None)
+        _tex_cache[img.name] = hit
+        if len(_tex_cache) > 512:
+            _tex_cache.pop(next(iter(_tex_cache)))
+    if hit[1] is None:
+        return None
+    ref = dict(hit[1], name=img.name)
+    try:
+        ref["cs"] = img.colorspace_settings.name
+    except Exception:
+        pass
+    return ref
+
+
+def _socket_value(sock):
+    if sock.type == "VALUE":
+        return round(float(sock.default_value), 5)
+    if sock.type in ("RGBA", "VECTOR"):
+        return [round(float(x), 5) for x in sock.default_value]
+    return None
+
+
+def serialize_material(mat):
+    """Wire state of one material (see the section header)."""
+    item = {"n": mat.name, "c": _base_color(mat)}
+    try:
+        item["vm"] = round(float(mat.metallic), 5)
+        item["vr"] = round(float(mat.roughness), 5)
+        for key, attr in _MAT_SETTINGS:
+            if hasattr(mat, attr):
+                item[key] = getattr(mat, attr)
+    except Exception:
+        pass
+    if mat.is_grease_pencil and mat.grease_pencil is not None:
+        gp = mat.grease_pencil
+        item["gp"] = {k: ([round(float(x), 5) for x in getattr(gp, k)] if k.endswith("color") else getattr(gp, k))
+                      for k in _GP_STYLE_KEYS if hasattr(gp, k)}
+    node = _principled(mat)
+    if node is None:
+        return item
+    values, textures, foreign = {}, {}, []
+    for sock in node.inputs:
+        if sock.is_linked:
+            ref = None
+            if sock.identifier in TEX_INPUTS:
+                texnode = _image_node(sock)
+                ref = _tex_ref(texnode.image) if texnode is not None else None
+                if ref is not None:
+                    link = sock.links[0]
+                    if link.from_node == texnode:
+                        ref["out"] = link.from_socket.identifier  # Color or Alpha
+                    textures[sock.identifier] = ref
+            if ref is None:
+                foreign.append(sock.identifier)
+        elif not sock.hide_value and hasattr(sock, "default_value"):
+            v = _socket_value(sock)
+            if v is not None:
+                values[sock.identifier] = v
+    item["p"] = values
+    base = textures.pop("Base Color", None)
+    if base is not None:
+        item["tex"] = base
+    if textures:
+        item["tx"] = textures
+    if foreign:
+        item["l"] = sorted(foreign)
+    return item
+
+
+def state_digest(item):
+    return _digest_bytes(json.dumps(item, sort_keys=True, separators=(",", ":")))
+
+
+def material_digest(mat):
+    return state_digest(serialize_material(mat))
+
+
+def material_delta(prev, item):
+    """What changed from prev to item, in the same wire format (apply_material only touches keys it is given).
+    A removed texture shows up as a new plain value in "p", which is what makes the receiver unlink it."""
+    out = {"n": item["n"]}
+    for key, value in item.items():
+        if key in ("p", "tx"):
+            old = prev.get(key) or {}
+            sub = {k: v for k, v in value.items() if old.get(k) != v}
+            if sub:
+                out[key] = sub
+        elif key != "l" and prev.get(key) != value:
+            out[key] = value
+    return out
+
+
+def material_uid(mat):
+    """Identity that survives a rename (and undo), so a rename is not mistaken for delete + create."""
+    return getattr(mat, "session_uid", None) or mat.as_pointer()
+
+
+def material_textures(item):
+    """All texture refs of one serialized material."""
+    if not item:
+        return []
+    out = [item["tex"]] if item.get("tex") else []
+    out.extend((item.get("tx") or {}).values())
+    return out
+
+
 def serialize_materials(ob):
-    """Per slot: {"n": name, "c": [rgba], "tex": {"id", "name", "ext"}|absent}. Images themselves travel separately."""
+    """Per slot: serialize_material() or None for an empty slot."""
     if ob.data is None or not hasattr(ob.data, "materials"):
         return []
-    out = []
-    for slot in ob.material_slots:
-        m = slot.material
-        if m is None:
-            out.append(None)
-            continue
-        item = {"n": m.name, "c": _base_color(m)}
-        if m.is_grease_pencil and m.grease_pencil is not None:
-            gp = m.grease_pencil
-            item["gp"] = {
-                "color": [round(float(x), 5) for x in gp.color],
-                "fill_color": [round(float(x), 5) for x in gp.fill_color],
-                "mode": gp.mode,
-                "stroke_style": gp.stroke_style,
-                "fill_style": gp.fill_style,
-                "alignment_mode": gp.alignment_mode,
-                "use_overlap_strokes": gp.use_overlap_strokes,
-                "use_stroke_holdout": gp.use_stroke_holdout,
-                "use_fill_holdout": gp.use_fill_holdout,
-            }
-        img = _base_color_image(m)
-        if img is not None:
-            got = image_bytes(img)
-            if got:
-                data, ext = got
-                item["tex"] = {"id": image_id(data), "name": img.name, "ext": ext}
-        out.append(item)
-    return out
+    return [serialize_material(slot.material) if slot.material is not None else None for slot in ob.material_slots]
+
+
+def serialize_slots(ob):
+    """[[material name | None, "DATA" | "OBJECT"], ...] or None when the object cannot have materials."""
+    if ob.data is None or not hasattr(ob.data, "materials"):
+        return None
+    return [[slot.material.name if slot.material is not None else None, slot.link] for slot in ob.material_slots]
 
 
 def images_for_materials(mats):
     """Yield (id, data, name, ext) for every texture referenced by a serialized material list."""
     seen = set()
     for item in mats or []:
-        tex = (item or {}).get("tex")
-        if not tex or tex["id"] in seen:
-            continue
-        seen.add(tex["id"])
-        img = bpy.data.images.get(tex["name"])
-        got = image_bytes(img) if img else None
-        if got and image_id(got[0]) == tex["id"]:
-            yield tex["id"], got[0], tex["name"], got[1]
+        for tex in material_textures(item):
+            if tex["id"] in seen:
+                continue
+            seen.add(tex["id"])
+            img = bpy.data.images.get(tex["name"])
+            got = image_bytes(img) if img else None
+            if got and image_id(got[0]) == tex["id"]:
+                yield tex["id"], got[0], tex["name"], got[1]
 
 
 _hash_index = {"n": -1, "map": {}}
@@ -583,8 +731,136 @@ def store_image(img_id, data, name, ext):
     return img
 
 
+def _differs(a, b):
+    try:
+        if isinstance(b, (list, tuple)):
+            return len(a) != len(b) or any(abs(float(x) - float(y)) > 1e-6 for x, y in zip(a, b))
+        if isinstance(b, float):
+            return abs(float(a) - b) > 1e-6
+    except TypeError:
+        return True
+    return a != b
+
+
+def _set(owner, attr, value):
+    """setattr only on a real change: every write tags the depsgraph and would wake the change detector."""
+    try:
+        if _differs(getattr(owner, attr), value):
+            setattr(owner, attr, value)
+    except Exception:
+        pass
+
+
+def _apply_texture(mat, node, sock, tex):
+    """Make `sock` read image `tex`. Returns False when the image is not here yet."""
+    img = find_image(tex["id"])
+    if img is None:
+        return False
+    cs = tex.get("cs")
+    if cs:
+        try:
+            if img.colorspace_settings.name != cs:
+                img.colorspace_settings.name = cs
+        except Exception:
+            pass
+    current = _image_node(sock)
+    if current is not None:  # keep the local graph (mapping, mix, normal map...) and swap the image only
+        if current.image != img:
+            current.image = img
+        return True
+    tree = mat.node_tree
+    texnode = next((n for n in tree.nodes if n.type == "TEX_IMAGE" and n.image == img), None)
+    if texnode is None:
+        texnode = tree.nodes.new("ShaderNodeTexImage")
+        texnode.image = img
+        row = TEX_INPUTS.index(sock.identifier) if sock.identifier in TEX_INPUTS else 0
+        texnode.location = (node.location.x - 600, node.location.y - 280 * row)
+    for l in list(sock.links):
+        tree.links.remove(l)
+    out = texnode.outputs.get(tex.get("out") or "Color") or texnode.outputs["Color"]
+    if sock.identifier == "Normal":
+        nm = tree.nodes.new("ShaderNodeNormalMap")
+        nm.location = (node.location.x - 250, texnode.location.y)
+        tree.links.new(out, nm.inputs["Color"])
+        tree.links.new(nm.outputs["Normal"], sock)
+    else:
+        tree.links.new(out, sock)
+    return True
+
+
+def apply_material(item, textures_only=False):
+    """Create / update the material named item["n"]. Returns (material, [missing texture ids])."""
+    missing = []
+    mat = bpy.data.materials.get(item["n"])
+    if mat is None:
+        mat = bpy.data.materials.new(item["n"])
+        if mat.name != item["n"]:
+            mat.name = item["n"]
+    gp_data = item.get("gp")
+    if gp_data and not mat.is_grease_pencil:
+        bpy.data.materials.create_gpencil_data(mat)
+    node = _principled(mat) if gp_data else _ensure_principled(mat)
+    if not textures_only:
+        if gp_data and mat.grease_pencil is not None:
+            for key, value in gp_data.items():
+                if hasattr(mat.grease_pencil, key):
+                    _set(mat.grease_pencil, key, value)
+        col = item.get("c")
+        if col and len(col) == 4:
+            _set(mat, "diffuse_color", col)
+            if node is not None and "p" not in item and not node.inputs["Base Color"].is_linked:
+                _set(node.inputs["Base Color"], "default_value", col)  # pre-0.7 peers send the colour only
+        if "vm" in item:
+            _set(mat, "metallic", item["vm"])
+        if "vr" in item:
+            _set(mat, "roughness", item["vr"])
+        for key, attr in _MAT_SETTINGS:
+            if key in item and hasattr(mat, attr):
+                _set(mat, attr, item[key])
+    if node is None:
+        return mat, missing
+    sockets = {s.identifier: s for s in node.inputs}
+    if not textures_only:
+        for ident, value in (item.get("p") or {}).items():
+            sock = sockets.get(ident)
+            if sock is None or not hasattr(sock, "default_value"):
+                continue
+            for l in list(sock.links):  # the sender has a plain value here (e.g. texture removed)
+                mat.node_tree.links.remove(l)
+            _set(sock, "default_value", value)
+    textures = dict(item.get("tx") or {})
+    if item.get("tex"):
+        textures["Base Color"] = item["tex"]
+    for ident, tex in textures.items():
+        sock = sockets.get(ident)
+        if sock is not None and not _apply_texture(mat, node, sock, tex):
+            missing.append(tex["id"])
+    return mat, missing
+
+
+def apply_slots(ob, slots):
+    """Make the object's material slots exactly `slots` ([[name | None, link], ...])."""
+    if slots is None or ob.data is None or not hasattr(ob.data, "materials"):
+        return
+    mats = ob.data.materials
+    while len(mats) < len(slots):
+        mats.append(None)
+    while len(mats) > len(slots):
+        mats.pop(index=len(mats) - 1)
+    for i, (name, link) in enumerate(slots):
+        mat = None
+        if name is not None:
+            mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)  # its state follows in a "mat" message
+        slot = ob.material_slots[i]
+        if link in ("DATA", "OBJECT") and slot.link != link:
+            slot.link = link
+        if slot.material != mat:
+            slot.material = mat
+
+
 def apply_materials(ob, mats):
-    """Returns the list of texture ids that are referenced but not available here (yet)."""
+    """obj_add: upsert every material and fill the slots in order.
+    Returns the list of texture ids that are referenced but not available here (yet)."""
     missing = []
     if not mats or ob.data is None or not hasattr(ob.data, "materials"):
         return missing
@@ -594,35 +870,8 @@ def apply_materials(ob, mats):
     for i, item in enumerate(mats):
         if item is None:
             continue
-        mat = bpy.data.materials.get(item["n"])
-        if mat is None:
-            mat = bpy.data.materials.new(item["n"])
-        gp_data = item.get("gp")
-        if gp_data and not mat.is_grease_pencil:
-            bpy.data.materials.create_gpencil_data(mat)
-        if gp_data and mat.grease_pencil is not None:
-            style = mat.grease_pencil
-            for key, value in gp_data.items():
-                if hasattr(style, key):
-                    setattr(style, key, value)
-        col = item.get("c")
-        node = _principled(mat)
-        if col and len(col) == 4:
-            mat.diffuse_color = col
-            if node:
-                node.inputs["Base Color"].default_value = col
-        tex = item.get("tex")
-        if tex and node is not None:
-            img = find_image(tex["id"])
-            if img is None:
-                missing.append(tex["id"])
-            elif _base_color_image(mat) is not img:
-                tree = mat.node_tree
-                texnode = tree.nodes.new("ShaderNodeTexImage")
-                texnode.image = img
-                texnode.location = (node.location.x - 300, node.location.y)
-                for l in list(node.inputs["Base Color"].links):
-                    tree.links.remove(l)
-                tree.links.new(texnode.outputs["Color"], node.inputs["Base Color"])
-        me.materials[i] = mat
+        mat, miss = apply_material(item)
+        missing.extend(miss)
+        if me.materials[i] != mat:
+            me.materials[i] = mat
     return missing

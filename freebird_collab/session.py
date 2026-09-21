@@ -27,7 +27,9 @@ XFORM_HZ = 30.0
 PING_SECONDS = 20.0
 DATA_HZ = 5.0  # max obj_data checks/sends per second (per object)
 DATA_BUDGET_BPS = 1_500_000  # bytes/s per object: a 3 MB mesh is re-sent at most every 2 s while being edited
-SWEEP_SECONDS = 2.0  # safety-net re-check of small datablocks (lights, cameras, empties, text)
+SWEEP_SECONDS = 2.0  # safety-net re-check of small datablocks (lights, cameras, empties, text, materials)
+MAT_HZ = 5.0  # max material / material-slot checks per second
+SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
 
 
@@ -115,8 +117,19 @@ class CollabSession:
         self._pending_data = {}  # obj name -> payload waiting until the object leaves local Edit Mode
         self._pending_parent = {}  # child name -> parent name not yet present
         self._sent_images = set()  # image ids already pushed to the room this session
-        self._snapshot_images = set()  # (host) image ids that were in the .blend sent to guests
-        self._waiting_tex = {}  # image id -> [(object name, mats)] waiting for that texture
+        self._snapshot_images = set()  # image ids that were in the .blend snapshot (sent as host / received as guest)
+        self._waiting_tex = {}  # image id -> {material names} waiting for that texture
+        # material sync (Issue #2): datablock state by name, identity by session_uid so a rename is a rename
+        self.mat_names = {}  # material uid -> name at the last check
+        self.mat_digest = {}  # material name -> digest of last sent or applied state
+        self.slot_state = {}  # obj name -> [[material name | None, link], ...] last sent or applied
+        self._mat_state = {}  # material name -> last sent or applied state (deltas are computed against it)
+        self._mat_rx = {}  # material name -> texture refs received (linked once a missing image arrives)
+        self._mat_sent_t = {}  # material name -> when we last sent a change (host settles crossing edits)
+        self._dirty_mats = set()  # material names flagged by the depsgraph handler
+        self._dirty_trees = set()  # pointers of shader node trees flagged by the handler (owner resolved later)
+        self._last_mat_t = 0.0
+        self._last_mat_sweep_t = 0.0
         self._logged = set()
         self._last_data_t = 0.0
         self._last_sweep_t = 0.0
@@ -187,6 +200,14 @@ class CollabSession:
         self._sent_images.clear()
         self._snapshot_images.clear()
         self._waiting_tex.clear()
+        self.mat_names.clear()
+        self.mat_digest.clear()
+        self.slot_state.clear()
+        self._mat_rx.clear()
+        self._mat_state.clear()
+        self._mat_sent_t.clear()
+        self._dirty_mats.clear()
+        self._dirty_trees.clear()
         self._logged.clear()
         self._scene_loaded_from_host = False
         self._pending_scene = None
@@ -219,6 +240,10 @@ class CollabSession:
                             session._dirty.add(idb.name)
                     elif isinstance(idb, data_types):
                         session._dirty_data.add((type(idb).__name__, idb.name))
+                    elif isinstance(idb, bpy.types.Material):
+                        session._dirty_mats.add(idb.name)
+                    elif isinstance(idb, bpy.types.ShaderNodeTree):
+                        session._dirty_trees.add(idb.original.as_pointer())
             except Exception:
                 pass
 
@@ -251,7 +276,7 @@ class CollabSession:
         if self.link and self.link.connected:
             self.link.send(msg)
             self.stats["tx"] += 1
-            if msg.get("t") in ("obj_data", "obj_add", "xform", "scene", "img"):
+            if msg.get("t") in ("obj_data", "obj_add", "xform", "scene", "img", "mat", "mat_ren", "mat_del", "obj_mats"):
                 n = len(json.dumps(msg, separators=(",", ":")))
                 self.stats["tx_bytes"] += n
                 bt = self.stats["tx_by_type"].setdefault(msg["t"], [0, 0])
@@ -305,6 +330,9 @@ class CollabSession:
             if now - self._last_data_t >= 1.0 / DATA_HZ:
                 self._last_data_t = now
                 self._sync_object_data(now)
+            if now - self._last_mat_t >= 1.0 / MAT_HZ:
+                self._last_mat_t = now
+                self._sync_materials(now)
         if now - self._last_presence_t >= 1.0 / PRESENCE_HZ:
             self._last_presence_t = now
             self._send_presence()
@@ -317,7 +345,7 @@ class CollabSession:
     # ------------------------------------------------------------------
     def _handle(self, msg):
         t = msg.get("t")
-        if self._pending_scene is not None and t in ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need"):
+        if self._pending_scene is not None and t in SCENE_EDIT_TYPES:
             self._deferred.append(msg)
             return
         if t == "welcome":
@@ -371,11 +399,20 @@ class CollabSession:
                 _log(f"received image {msg.get('name')} ({len(msg['b64']) * 3 // 4 // 1024} KB)")
             except Exception as e:
                 _log(f"image {msg.get('name')} failed: {e}")
+            self._sent_images.add(msg["id"])  # the room has it: never push it back when we edit that material
             self._apply_waiting_materials(msg["id"])
         elif t == "img_need":  # peer lacks a texture we referenced: look it up by content id and send it
             self._answer_img_need(msg)
         elif t == "obj_del":
             self._apply_obj_del(msg.get("names", []))
+        elif t == "mat":
+            self._apply_mat(msg)
+        elif t == "mat_ren":
+            self._apply_mat_ren(msg.get("old"), msg.get("new"))
+        elif t == "mat_del":
+            self._apply_mat_del(msg.get("names", []))
+        elif t == "obj_mats":
+            self._apply_obj_mats(msg)
         elif t == "save":
             if self.role == "host":
                 self.save_master()
@@ -423,6 +460,11 @@ class CollabSession:
         bpy.ops.wm.open_mainfile(filepath=tmp, load_ui=False)
         self._scene_loaded_from_host = True
         self._snapshot_tracking()
+        for img in bpy.data.images:  # everything packed in the host's file is already on the host:
+            if img.packed_file is not None:  # editing a GLB material must not upload its textures back
+                got = object_data.image_bytes(img)
+                if got:
+                    self._snapshot_images.add(object_data.image_id(got[0]))
         self.status = f"JOINED room {self.room} (scene from host)"
         self._notify()
 
@@ -454,6 +496,7 @@ class CollabSession:
                 _log(f"digest failed for {ob.name}: {e}")
         self._dirty.clear()
         self._dirty_data.clear()
+        self._snapshot_materials()
 
     def _sync_objects(self):
         changed = {}
@@ -488,6 +531,7 @@ class CollabSession:
                 self.tracked.pop(n, None)
                 self.data_digest.pop(n, None)
                 self._next_data_t.pop(n, None)
+                self.slot_state.pop(n, None)
         self.known = current
         if changed:
             self._send(make("xform", objs=changed))
@@ -512,6 +556,10 @@ class CollabSession:
         try:
             mats = object_data.serialize_materials(ob)
             self._send_images(mats)
+            self.slot_state[ob.name] = object_data.serialize_slots(ob)
+            for slot in ob.material_slots:  # the state rides inside obj_add: no separate "mat" needed
+                if slot.material is not None:
+                    self._remember_material(slot.material)
         except Exception as e:
             self._log_once(f"materials for {ob.name}: {e}")
             mats = []
@@ -521,26 +569,43 @@ class CollabSession:
         self._next_data_t[ob.name] = time.time() + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
 
     def _apply_mats(self, ob, mats, from_uid):
+        """obj_add: upsert the materials it carries and fill the slots."""
         try:
             missing = object_data.apply_materials(ob, mats)
         except Exception as e:
             _log(f"materials for {ob.name}: {e}")
             return
-        for img_id in missing:
-            waiting = self._waiting_tex.setdefault(img_id, [])
-            if not waiting:  # first time we miss this id: ask the sender for it
-                self._send(make("img_need", to=from_uid, id=img_id))
-                _log(f"texture {img_id[:8]} for {ob.name} not here yet, requested from {from_uid}")
-            waiting.append((ob.name, mats))
+        for item in mats or []:
+            if item:
+                self._note_textures(item)
+                mat = bpy.data.materials.get(item["n"])
+                if mat is not None:
+                    self._remember_material(mat)
+        self._want_textures(mats, missing, from_uid, ob.name)
+        self.slot_state[ob.name] = object_data.serialize_slots(ob)
+
+    def _want_textures(self, items, missing, from_uid, what):
+        missing = set(missing)
+        for item in items or []:
+            for tex in object_data.material_textures(item):
+                if tex["id"] not in missing:
+                    continue
+                waiting = self._waiting_tex.setdefault(tex["id"], set())
+                if not waiting:  # first time we miss this id: ask the sender for it
+                    self._send(make("img_need", to=from_uid, id=tex["id"]))
+                    _log(f"texture {tex['id'][:8]} for {what} not here yet, requested from {from_uid}")
+                waiting.add(item["n"])
 
     def _apply_waiting_materials(self, img_id):
-        for ob_name, mats in self._waiting_tex.pop(img_id, []):
-            ob = bpy.data.objects.get(ob_name)
-            if ob is not None:
-                try:
-                    object_data.apply_materials(ob, mats)
-                except Exception as e:
-                    _log(f"materials for {ob_name}: {e}")
+        for mat_name in self._waiting_tex.pop(img_id, ()):
+            refs = {k: t for k, t in self._mat_rx.get(mat_name, {}).items() if t["id"] == img_id}
+            if not refs or mat_name not in bpy.data.materials:
+                continue  # a newer state no longer uses this image
+            try:
+                mat, _missing = object_data.apply_material({"n": mat_name, "tx": refs}, textures_only=True)
+                self._remember_material(mat)
+            except Exception as e:
+                _log(f"texture for material {mat_name}: {e}")
 
     def _answer_img_need(self, msg):
         img_id = msg.get("id")
@@ -555,15 +620,200 @@ class CollabSession:
     def _send_images(self, mats):
         """Push Base Color textures referenced by mats, each image at most once per session."""
         for img_id, data, name, ext in object_data.images_for_materials(mats):
-            if img_id in self._sent_images or (self.role == "host" and self._image_in_snapshot(img_id)):
+            if img_id in self._sent_images or self._image_in_snapshot(img_id):
                 continue
             self._sent_images.add(img_id)
             self._send(make("img", id=img_id, name=name, ext=ext, b64=base64.b64encode(data).decode("ascii")))
             _log(f"sent image {name} ({len(data) // 1024} KB, {img_id[:8]})")
 
     def _image_in_snapshot(self, img_id):
-        """Images that were already packed when the guest received the .blend need no re-send."""
+        """Images that travelled inside the .blend snapshot (host: sent, guest: received) need no re-send.
+        With 3+ peers a later joiner may lack one; img_need recovers that."""
         return img_id in self._snapshot_images
+
+    # ------------------------------------------------------------------
+    # material sync (Issue #2): create / delete / rename, Principled BSDF values, image textures, slots
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _iter_materials():
+        for mat in bpy.data.materials:
+            if not mat.library:
+                yield mat
+
+    def _remember_material(self, mat):
+        """Record the current local state as "in sync" (echo suppression after send or apply)."""
+        try:
+            self.mat_names[object_data.material_uid(mat)] = mat.name
+            item = object_data.serialize_material(mat)
+            self._mat_state[mat.name] = item
+            self.mat_digest[mat.name] = object_data.state_digest(item)
+        except Exception as e:
+            self._log_once(f"material digest failed for {mat.name}: {e}")
+        self._dirty_mats.discard(mat.name)
+
+    def _snapshot_materials(self):
+        self.mat_names = {}
+        self.mat_digest = {}
+        self._mat_state = {}
+        for mat in self._iter_materials():
+            self._remember_material(mat)
+        self.slot_state = {}
+        for ob in self._iter_objects():
+            slots = object_data.serialize_slots(ob)
+            if slots is not None:
+                self.slot_state[ob.name] = slots
+        self._dirty_mats.clear()
+        self._dirty_trees.clear()
+
+    def _sync_materials(self, now):
+        sweep = now - self._last_mat_sweep_t >= SWEEP_SECONDS  # safety net: edits that never reach the depsgraph
+        if sweep:
+            self._last_mat_sweep_t = now
+        dirty, self._dirty_mats = self._dirty_mats, set()
+        trees, self._dirty_trees = self._dirty_trees, set()
+        current = {}
+        for mat in self._iter_materials():
+            uid = object_data.material_uid(mat)
+            current[uid] = mat.name
+            old = self.mat_names.get(uid)
+            if old is not None and old != mat.name:
+                self._renamed_material(old, mat.name)
+                self._send(make("mat_ren", old=old, new=mat.name))
+                _log(f"sent material rename {old} -> {mat.name}")
+            if old is None or sweep or mat.name in dirty or (
+                    trees and mat.node_tree is not None and mat.node_tree.as_pointer() in trees):
+                try:
+                    self._send_material_if_changed(mat)
+                except Exception as e:
+                    self._log_once(f"material sync failed for {mat.name}: {e}")
+        removed = [name for uid, name in self.mat_names.items() if uid not in current and name not in current.values()]
+        if removed:
+            self._send(make("mat_del", names=sorted(removed)))
+            _log(f"sent material delete {', '.join(sorted(removed))}")
+            for name in removed:
+                self._forget_material(name)
+        self.mat_names = current
+        # slots last: the materials they name were sent above, and the hub keeps the order
+        for ob in self._iter_objects():
+            if ob.name not in self.known:
+                continue  # not announced yet; obj_add will carry its materials
+            slots = object_data.serialize_slots(ob)
+            if slots is not None and slots != self.slot_state.get(ob.name):
+                self.slot_state[ob.name] = slots
+                self._send(make("obj_mats", name=ob.name, slots=slots))
+
+    def _send_material_if_changed(self, mat, full=False):
+        """Send what changed since the last sent / applied state (only the changed Principled inputs,
+        so two people tuning different sliders of one material do not overwrite each other)."""
+        item = object_data.serialize_material(mat)
+        digest = object_data.state_digest(item)
+        if digest == self.mat_digest.get(mat.name) and not full:
+            return False
+        prev = None if full else self._mat_state.get(mat.name)
+        self.mat_digest[mat.name] = digest
+        self._mat_state[mat.name] = item
+        out = object_data.material_delta(prev, item) if prev else item
+        if len(out) == 1:
+            return False  # only things we do not sync changed (e.g. a procedural node was plugged in)
+        self._send_images([out])
+        self._send(make("mat", mat=out))
+        self._mat_sent_t[mat.name] = time.time()
+        return True
+
+    def _forget_material(self, name):
+        for table in (self.mat_digest, self._mat_state, self._mat_rx, self._mat_sent_t):
+            table.pop(name, None)
+
+    def _renamed_material(self, old, new):
+        for table in (self.mat_digest, self._mat_rx, self._mat_sent_t):
+            if old in table:
+                table[new] = table.pop(old)
+        if old in self._mat_state:
+            self._mat_state[new] = dict(self._mat_state.pop(old), n=new)
+            self.mat_digest[new] = object_data.state_digest(self._mat_state[new])
+        for waiting in self._waiting_tex.values():
+            if old in waiting:
+                waiting.discard(old)
+                waiting.add(new)
+        for slots in self.slot_state.values():
+            for slot in slots:
+                if slot[0] == old:
+                    slot[0] = new
+
+    def _apply_mat(self, msg):
+        item = msg.get("mat")
+        if not item or not item.get("n"):
+            return
+        name = item["n"]
+        local = bpy.data.materials.get(name)
+        if local is not None and name in self.mat_digest and not local.library:
+            try:  # a local edit we have not sent yet must go out first, or the remote state would bury it
+                self._send_material_if_changed(local)
+            except Exception as e:
+                self._log_once(f"material sync failed for {name}: {e}")
+        try:
+            mat, missing = object_data.apply_material(item)
+        except Exception as e:
+            _log(f"apply material {name} failed: {e}")
+            return
+        self._note_textures(item)
+        self._remember_material(mat)
+        self._want_textures([item], missing, msg.get("from"), f"material {mat.name}")
+        if self.role == "host" and time.time() - self._mat_sent_t.get(name, 0.0) < 1.0:
+            # both sides changed this material at the same moment: values crossed on the wire and would end up
+            # swapped. The host's result (remote applied on top of its own) is the one everybody keeps.
+            self._send_material_if_changed(mat, full=True)
+
+    def _note_textures(self, item):
+        refs = self._mat_rx.setdefault(item["n"], {})
+        for ident in item.get("p") or {}:  # that input is a plain value now
+            refs.pop(ident, None)
+        if item.get("tex"):
+            refs["Base Color"] = item["tex"]
+        refs.update(item.get("tx") or {})
+
+    def _apply_mat_ren(self, old, new):
+        if not old or not new or old == new:
+            return
+        mat = bpy.data.materials.get(old)
+        if mat is None:
+            return  # unknown here; its state arrives under the new name
+        squatter = bpy.data.materials.get(new)
+        if squatter is not None and squatter != mat:  # remote naming authority, same as objects
+            mat.user_remap(squatter)
+            self.mat_names.pop(object_data.material_uid(mat), None)
+            self._forget_material(old)
+            bpy.data.materials.remove(mat)
+            mat = squatter
+        else:
+            mat.name = new
+        self._renamed_material(old, new)
+        self._remember_material(mat)
+
+    def _apply_mat_del(self, names):
+        for name in names:
+            mat = bpy.data.materials.get(name)
+            if mat is not None and not mat.library:
+                self.mat_names.pop(object_data.material_uid(mat), None)
+                bpy.data.materials.remove(mat)
+            self._forget_material(name)
+        for ob in self._iter_objects():  # slots that pointed at it are now empty on both sides
+            if ob.name in self.slot_state:
+                self.slot_state[ob.name] = object_data.serialize_slots(ob)
+
+    def _apply_obj_mats(self, msg):
+        ob = bpy.data.objects.get(msg.get("name", ""))
+        if ob is None:
+            return
+        try:
+            object_data.apply_slots(ob, msg.get("slots"))
+        except Exception as e:
+            _log(f"material slots for {ob.name}: {e}")
+            return
+        self.slot_state[ob.name] = object_data.serialize_slots(ob)
+        for slot in ob.material_slots:  # placeholders created for unknown names must not echo back
+            if slot.material is not None and object_data.material_uid(slot.material) not in self.mat_names:
+                self._remember_material(slot.material)
 
     def _collect_dirty(self, now):
         """Names of objects whose data may have changed since we last sent/applied it."""
@@ -728,6 +978,7 @@ class CollabSession:
             self.tracked.pop(name, None)
             self.data_digest.pop(name, None)
             self._pending_data.pop(name, None)
+            self.slot_state.pop(name, None)
             self.known.discard(name)
 
     # ------------------------------------------------------------------

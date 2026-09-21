@@ -18,9 +18,14 @@ Message types (client -> hub -> peers):
                    tool, sel:[names], mode}                  ~20 Hz
   xform           {objs:{name:[16 floats]}}                  only for changed objects
   obj_add         {name, type, payload:{type, data}, m:[16], parent:name|null,
-                   mats:[{n, c:[rgba]}|null]}                  (see object_data.py)
+                   mats:[{n, c:[rgba], p, tex, tx, ...}|null]} (see object_data.py)
   obj_data        {name, payload:{type, data}}                 datablock contents changed
-  img             {id: sha1, name, ext, b64}                   Base Color texture, once per image per session
+  mat             {mat:{n, ...}}                               material created / changed. Same state dict as in
+                                                               obj_add.mats; only the changed keys travel (object_data.py)
+  mat_ren         {old, new}                                   material renamed (identity = session_uid on the sender)
+  mat_del         {names:[..]}                                 material deleted
+  obj_mats        {name, slots:[[material|null, DATA|OBJECT]]} material slots of an object (assignment / count / link)
+  img             {id: sha1, name, ext, b64}                   image texture, once per image per session
   img_need        {to, id}                                     receiver lacks a referenced texture -> sender answers with img
   chunk           {id, i, n, d}                                 link.py splits messages > 700 KB
   obj_del         {names:[..]}
