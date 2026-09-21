@@ -202,6 +202,10 @@ class CollabSession:
         from bpy.app.handlers import persistent
 
         session = self
+        data_types = (bpy.types.Mesh, bpy.types.Curve, bpy.types.Light, bpy.types.Camera)
+        grease_pencil_type = getattr(bpy.types, "GreasePencil", None)
+        if grease_pencil_type is not None:
+            data_types += (grease_pencil_type,)
 
         @persistent
         def _on_depsgraph(scene, depsgraph=None):
@@ -213,7 +217,7 @@ class CollabSession:
                     if isinstance(idb, bpy.types.Object):
                         if u.is_updated_geometry:
                             session._dirty.add(idb.name)
-                    elif isinstance(idb, (bpy.types.Mesh, bpy.types.Curve, bpy.types.Light, bpy.types.Camera)):
+                    elif isinstance(idb, data_types):
                         session._dirty_data.add((type(idb).__name__, idb.name))
             except Exception:
                 pass
@@ -502,7 +506,7 @@ class CollabSession:
         if payload is None:  # unsupported type or too big: show a placeholder so selection labels still make sense
             payload = {"type": "EMPTY", "data": {"display_type": "CUBE", "display_size": 0.2}, "placeholder": ob.type}
             self.data_digest[ob.name] = None
-            self._log_once(f"{ob.name} ({ob.type}) sent as placeholder: unsupported type or over {object_data.MAX_MESH_VERTS_ADD} verts")
+            self._log_once(f"{ob.name} ({ob.type}) sent as placeholder: unsupported type or over the live-sync size limit")
         else:
             self.data_digest[ob.name] = object_data.quick_digest(ob)
         try:
@@ -576,6 +580,10 @@ class CollabSession:
         for ob in bpy.data.objects:
             if ob.mode == "EDIT" and not ob.name.startswith(IGNORE_PREFIXES):
                 names.add(ob.name)
+            elif ob.type == "GREASEPENCIL" and ob.mode in (
+                "PAINT_GREASE_PENCIL", "SCULPT_GREASE_PENCIL", "VERTEX_GREASE_PENCIL", "WEIGHT_GREASE_PENCIL"
+            ) and not ob.name.startswith(IGNORE_PREFIXES):
+                names.add(ob.name)
         # safety-net sweep of the tiny datablocks (a handler miss on a lamp slider must not stick forever)
         if now - self._last_sweep_t >= SWEEP_SECONDS:
             self._last_sweep_t = now
@@ -621,10 +629,18 @@ class CollabSession:
         if ob is None:
             return
         payload = msg["payload"]
-        if ob.type == "MESH" and ob.mode == "EDIT":
-            self._pending_data[name] = payload  # apply once the local user leaves Edit Mode
+        if self._editing_data_locally(ob):
+            self._pending_data[name] = payload  # apply once the local user leaves the data-editing mode
             return
         self._apply_payload(ob, payload)
+
+    @staticmethod
+    def _editing_data_locally(ob):
+        if ob.type == "MESH":
+            return ob.mode == "EDIT"
+        if ob.type == "GREASEPENCIL":
+            return ob.mode != "OBJECT"
+        return False
 
     def _apply_payload(self, ob, payload):
         try:
@@ -641,7 +657,7 @@ class CollabSession:
             ob = bpy.data.objects.get(name)
             if ob is None:
                 del self._pending_data[name]
-            elif ob.mode != "EDIT":
+            elif not self._editing_data_locally(ob):
                 self._apply_payload(ob, self._pending_data.pop(name))
 
     def _apply_xform(self, objs):

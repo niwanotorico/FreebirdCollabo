@@ -1,4 +1,4 @@
-# Freebird Collaboration Layer (MVP v0.6)
+# Freebird Collaboration Layer (MVP v0.6.2)
 
 Blender + Freebird XR で、Gravity Sketch の Co-Creation に近い「遠隔VR共同編集」を成立させる最小プロトタイプ。
 
@@ -12,7 +12,7 @@ FreebirdCollabo/
 ├─ freebird_collab/          Blender アドオン（scripts/addons にフォルダごと置く）
 │   ├─ __init__.py           UI・オペレーター・タイマー・公開API
 │   ├─ session.py            同期ロジック（正本共有 / Transform / オブジェクトデータ / Presence）
-│   ├─ object_data.py        Mesh/Curve/Text/Light/Camera/Empty の内容をシリアライズ・in-place 適用
+│   ├─ object_data.py        Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty の内容をシリアライズ・in-place 適用
 │   ├─ presence.py           相手の頭・手・レイ・選択枠・ラベルの GPU 描画
 │   ├─ hub.py                ROOM ハブ（relay サーバー兼 direct モードのホスト内蔵サーバー）
 │   ├─ link.py               TCP クライアント（受信スレッド → メインスレッドへキュー）
@@ -26,6 +26,7 @@ FreebirdCollabo/
 ├─ relay/relay_check.py      Relay 到達確認 CLI
 ├─ tests/test_sync.py        Blender 2 インスタンス自動同期テスト（VR不要）
 ├─ tests/test_data.py        オブジェクトデータ同期テスト（Edit Mode 頂点編集・全型・削除・送信量）
+├─ tests/test_grease_pencil.py  Grease Pencil同期テスト（新規作成・描画・編集・材質・双方向）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    インターネット越し ROOM コード参加の公開手順・実機テスト手順
@@ -57,7 +58,7 @@ FreebirdCollabo/
 
 ## 同期しているもの / していないもの
 
-同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
+同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
 
 同期しない（MVP 非目標）: Base Color 以外の PBR 入力（Normal / Roughness / Metallic 等）、Armature / アニメーション、法線 / モディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
 
@@ -70,6 +71,7 @@ python3 tests/test_sync.py relay    # tcp relay
 python3 tests/test_sync.py ws       # websocket relay
 python3 tests/test_sync.py wss      # websocket over TLS (local self-signed terminator)
 python3 tests/test_data.py direct   # object data sync (same modes as above)
+python3 tests/test_grease_pencil.py direct  # Grease Pencil create/draw/edit sync
 python3 tests/test_glb.py direct    # GLB import during a session (same modes as above)
 ```
 
