@@ -255,7 +255,9 @@ def _timer():
     try:
         _session.tick()
     except Exception as e:
-        print(f"[collab] tick error: {e}")
+        import traceback
+
+        print(f"[collab] tick error: {e}\n{traceback.format_exc()}")
     return TICK_INTERVAL
 
 

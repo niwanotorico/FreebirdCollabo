@@ -79,9 +79,9 @@ Bone 追加直後の Pose（構造が先に届く）、相手が同じリグを 
 Transform / Mesh / Material 同期の並行動作、再接続後の構造＋ポーズ一致とその後の双方向同期、アイドル時の無通信。
 unit 部分: edit_bones / Bone のシリアライズ一致、差分適用での Pose 保持、connected チェーン、別オブジェクト Edit Mode 中の適用拒否、Pose Mode の復元。
 
-確認済み: **bpy 5.0.1（headless）** で direct / relay / wss すべて PASS。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose）も PASS。
+確認済み: **bpy 5.0.1（headless）** で direct / relay / wss すべて PASS。**Blender 5.2 実機は 1 回目 NG**（接続中の Add > Armature が相手に出ない。再入室では出る）→ 上の切り分けログと timer コンテキスト対応を入れて再確認待ち。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose）も PASS。
 test_pose の「片側にしか無い Bone」のケースは、構造が同期されるようになったので「追加した Bone とその Pose が届く」に変更した。
-**Blender 5.2 実機では未確認**。
+
 
 ### 実機（Blender 5.2）での確認手順
 
@@ -98,6 +98,21 @@ test_pose の「片側にしか無い Bone」のケースは、構造が同期�
 11. System Console に `[collab] ... FAILED` が出ていないこと。Cube の移動 / Mesh Edit / マテリアル / Pose 同期が従来どおり動くこと
 12. 何もしない 5 秒間に `sent armature` / `sent pose` が出ないこと
 
+### 切り分け：接続中の Armature 新規作成が相手に出ない時（System Console を両側で見る）
+
+`Add > Armature` 1 回につき、A（作った側）と B（相手側）のコンソールに次の 4 行が順に出る。**どこで途切れたか**で原因が決まる。
+
+| # | 出る側 | ログ | 出ない時の意味 |
+| --- | --- | --- | --- |
+| 1 | A | `detected new object Armature (ARMATURE, mode OBJECT)` | A の変更検出が止まっている。直前に `tick error: ...`（traceback 付き）が無いか見る。Cube を動かして `xform` が届くかも確認 |
+| 2 | A | `sent obj_add Armature (ARMATURE, 0 KB, 1 bones)` | シリアライズ失敗。`serialize failed for Armature: ...` か `sent as placeholder` が出ているはず → 貼ってください |
+| 3 | B | `received obj_add Armature (ARMATURE) from u1` | ネットワークで届いていない。`xform` は届くのに `obj_add` だけ来ないなら relay のログも見る |
+| 4 | B | `created ARMATURE Armature` → `applied armature Armature (1 bones, 1 bones)` | `created` が無い: `cannot create Armature (ARMATURE): ... -> placeholder Empty` = **B のアドオンが v0.9.0 より古い**（`peer ... runs add-on v0.x.x` を確認）。`created` はあるが `applied` が無い: `apply data failed for Armature (ARMATURE): ...`（traceback 付き）か `... data for Armature held: local mode is ...` を貼ってください（B が Edit / Sculpt 等の間は保留される仕様） |
+
+`created ARMATURE` まで出て `applied` が失敗した場合、B には **Bone の無い Armature オブジェクト**（ビューポートには何も描かれない、Outliner にだけ出る）ができている。
+v0.9.0 の最初の版では受信側の Edit Mode 切替を `bpy.ops.object.mode_set` 素のまま呼んでいたが、アドオンは `bpy.app.timers` から動くため（ウィンドウ無しのコンテキスト）、
+`temp_override(window / VIEW_3D area / region / active_object)` 付きで呼び、失敗時は素の呼び出しにフォールバックするよう変更した（`object_data._mode_set`）。ローカルのモード判定も `bpy.context.mode` ではなく view layer のアクティブオブジェクトから取る（`object_data.local_mode`）。
+
 ### ログ
 
 | ログ | 意味 |
@@ -106,5 +121,8 @@ test_pose の「片側にしか無い Bone」のケースは、構造が同期�
 | `sent armature Rig (+tip; -arm.R; ~spine)` | 送信側: 構造の変更を送った（+ 追加 / - 削除 / ~ 変更） |
 | `applied armature Rig (+tip, 4 bones)` | 受信側: 適用した |
 | `armature Rig: local Edit Mode changes win over the structure received meanwhile` | 受信側: 自分の Edit Mode 中に届いた構造を捨て、自分の構造を送る（後勝ち） |
-| `apply data failed for Rig: ...` | 受信側: 適用で例外。このログを貼ってください |
+| `detected new object Rig (ARMATURE, mode OBJECT)` / `received obj_add Rig (ARMATURE) from u1` / `created ARMATURE Rig` | 新規作成の 4 地点（上の切り分け表） |
+| `ARMATURE data for Rig held: local mode is EDIT (active Cube); ...` | 受信側: ローカルが Edit / Sculpt 等なので保留中（Object / Pose Mode に戻ると適用） |
+| `apply data failed for Rig (ARMATURE): ...`（traceback 付き） | 受信側: 適用で例外。このログを貼ってください |
+| `cannot create Rig (ARMATURE): ... -> placeholder Empty` | 受信側のアドオンが古い（v0.9.0 未満）。両側とも入れ替える |
 | `Rig (ARMATURE) sent as placeholder: ...` | 送信側: Bone 数が上限（4000）超え。相手側は Empty のプレースホルダ |

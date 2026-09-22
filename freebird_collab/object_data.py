@@ -963,14 +963,65 @@ def armature_bones(ob):
     return _parents_first(items)
 
 
+def local_mode():
+    """Mode of the active object of the view layer ("OBJECT" when there is none). Read from the view layer, not
+    bpy.context.mode: inside a bpy.app.timers callback (where the add-on runs) the context has no window and
+    context.mode is not reliable, while the view layer is."""
+    try:
+        act = bpy.context.view_layer.objects.active
+        return act.mode if act is not None else "OBJECT"
+    except Exception:
+        try:
+            return bpy.context.mode
+        except Exception:
+            return "OBJECT"
+
+
 def armature_editable():
     """True when this Blender is in a mode from which we can enter Edit Mode on an armature and come back
     without destroying local work (Object / Pose Mode). While a mesh / curve / armature is being edited here,
     the structure is applied once that Edit Mode ends."""
+    return local_mode() in _EDIT_OK_MODES
+
+
+def _ui_override():
+    """Window / 3D View area / region for operators that need a real UI context (the add-on ticks from a timer,
+    whose context has no window). None in headless Blender."""
     try:
-        return bpy.context.mode in _EDIT_OK_MODES
+        for win in bpy.context.window_manager.windows:
+            for area in win.screen.areas:
+                if area.type == "VIEW_3D":
+                    region = next((r for r in area.regions if r.type == "WINDOW"), None)
+                    return {"window": win, "screen": win.screen, "area": area, "region": region}
+        wins = list(bpy.context.window_manager.windows)
+        if wins:
+            return {"window": wins[0], "screen": wins[0].screen}
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _mode_set(mode, ob=None):
+    """bpy.ops.object.mode_set that also works from a timer: first with a UI context override (real Blender),
+    then plain (headless / bpy module). Raises RuntimeError with both errors if neither works."""
+    override = _ui_override()
+    errors = []
+    if override is not None:
+        kw = dict(override)
+        if ob is not None:
+            kw.update(active_object=ob, object=ob, selected_objects=[ob], selected_editable_objects=[ob])
+        try:
+            with bpy.context.temp_override(**kw):
+                bpy.ops.object.mode_set(mode=mode)
+            return
+        except Exception as e:
+            errors.append(f"with UI override: {e}")
+    try:
+        bpy.ops.object.mode_set(mode=mode)
+        return
+    except Exception as e:
+        errors.append(f"plain: {e}")
+    raise RuntimeError(f"mode_set({mode}) failed ({'; '.join(errors)})")
 
 
 def _edit_armature(ob, fn):
@@ -981,8 +1032,8 @@ def _edit_armature(ob, fn):
     prev_mode = prev_active.mode if prev_active is not None else "OBJECT"
     prev_sel = [o for o in vl.objects if o.select_get(view_layer=vl)]
     try:
-        if bpy.context.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
+        if prev_mode != "OBJECT":
+            _mode_set("OBJECT", prev_active)
         for o in prev_sel:  # multi-object Edit Mode would pull other selected armatures in with us
             if o != ob:
                 o.select_set(False, view_layer=vl)
@@ -990,11 +1041,13 @@ def _edit_armature(ob, fn):
         ob.select_set(True, view_layer=vl)
         if ob.hide_viewport or not ob.visible_get(view_layer=vl):
             ob.hide_set(False, view_layer=vl)
-        bpy.ops.object.mode_set(mode="EDIT")
+        _mode_set("EDIT", ob)
+        if ob.mode != "EDIT":
+            raise RuntimeError(f"{ob.name} did not enter Edit Mode (mode={ob.mode}, active={vl.objects.active})")
         try:
             fn(ob.data)
         finally:
-            bpy.ops.object.mode_set(mode="OBJECT")
+            _mode_set("OBJECT", ob)
     finally:
         try:
             ob.select_set(ob in prev_sel, view_layer=vl)
@@ -1004,7 +1057,7 @@ def _edit_armature(ob, fn):
             if prev_active is not None and prev_active.name in bpy.data.objects:
                 vl.objects.active = prev_active
                 if prev_mode != "OBJECT":
-                    bpy.ops.object.mode_set(mode=prev_mode)
+                    _mode_set(prev_mode, prev_active)
         except Exception:
             pass
 

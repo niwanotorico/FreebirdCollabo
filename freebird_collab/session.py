@@ -453,6 +453,7 @@ class CollabSession:
         elif t == "xform":
             self._apply_xform(msg.get("objs", {}))
         elif t == "obj_add":
+            _log(f"received obj_add {msg.get('name')} ({msg.get('type')}) from {msg.get('from')}")  # [3/4] receive
             self._apply_obj_add(msg)
         elif t == "obj_data":
             self._apply_obj_data(msg)
@@ -585,6 +586,7 @@ class CollabSession:
         # and one broken object must never block the others
         new_objs.sort(key=lambda t: _depth(t[0]))
         for ob, m in new_objs:
+            _log(f"detected new object {ob.name} ({ob.type}, mode {ob.mode})")  # [1/4] local detect
             try:
                 self._send_obj_add(ob, m)
             except Exception as e:
@@ -634,7 +636,8 @@ class CollabSession:
             mats = []
         parent = ob.parent.name if ob.parent else None
         self._send(make("obj_add", name=ob.name, type=ob.type, payload=payload, m=m, parent=parent, mats=mats))
-        _log(f"sent obj_add {ob.name} ({ob.type}, {object_data.payload_bytes(payload) // 1024} KB{', parent ' + parent if parent else ''})")
+        _log(f"sent obj_add {ob.name} ({ob.type}, {object_data.payload_bytes(payload) // 1024} KB{', parent ' + parent if parent else ''}"
+             f"{', ' + str(len(payload['data'].get('bones') or [])) + ' bones' if payload.get('type') == 'ARMATURE' else ''})")  # [2/4] send
         self._next_data_t[ob.name] = time.time() + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
 
     def _apply_mats(self, ob, mats, from_uid):
@@ -1094,6 +1097,9 @@ class CollabSession:
             return
         payload = msg["payload"]
         if self._editing_data_locally(ob):
+            if name not in self._pending_data:
+                _log(f"{payload.get('type')} data for {name} held: local mode is {object_data.local_mode()} "
+                     f"(active {getattr(bpy.context.view_layer.objects.active, 'name', None)}); applied when back in Object / Pose Mode")
             self._pending_data[name] = payload  # apply once the local user leaves the data-editing mode
             return
         self._apply_payload(ob, payload)
@@ -1111,9 +1117,12 @@ class CollabSession:
     def _apply_payload(self, ob, payload):
         try:
             if not object_data.apply(ob, payload):
+                _log(f"apply data for {ob.name} ({payload.get('type')}) refused: local mode {object_data.local_mode()} / object mode {ob.mode}")
                 return
         except Exception as e:
-            _log(f"apply data failed for {ob.name}: {e}")
+            import traceback
+
+            _log(f"apply data failed for {ob.name} ({payload.get('type')}): {e}\n{traceback.format_exc()}")
             return
         self.data_digest[ob.name] = object_data.quick_digest(ob)  # echo suppression
         self._dirty.discard(ob.name)
@@ -1178,11 +1187,14 @@ class CollabSession:
             try:
                 ob = object_data.new_object(name, payload)
             except Exception as e:
-                _log(f"cannot create {name}: {e}")
-                return
+                # never leave the peer with nothing: a placeholder Empty keeps names / selection / xform in sync
+                _log(f"cannot create {name} ({payload.get('type')}): {e} -> placeholder Empty (is this add-on older than the sender's?)")
+                payload = {"type": "EMPTY", "data": {"display_type": "CUBE", "display_size": 0.2}, "placeholder": payload.get("type")}
+                ob = object_data.new_object(name, payload)
             bpy.context.scene.collection.objects.link(ob)
             if ob.name != name:  # name collision -> keep remote naming authority
                 ob.name = name
+            _log(f"created {ob.type} {ob.name}")  # [4/4] create
             if ob.type == "ARMATURE":  # bones are written in Edit Mode, possible only now that the object is in the scene
                 self._apply_obj_data({"name": ob.name, "payload": payload})
         self._apply_mats(ob, msg.get("mats"), msg.get("from"))
