@@ -1,4 +1,4 @@
-# Freebird Collaboration Layer (MVP v0.9.0)
+# Freebird Collaboration Layer (MVP v0.10.0)
 
 Blender + Freebird XR で、Gravity Sketch の Co-Creation に近い「遠隔VR共同編集」を成立させる最小プロトタイプ。
 
@@ -30,6 +30,7 @@ FreebirdCollabo/
 ├─ tests/test_materials.py   マテリアル同期テスト（作成/削除/Rename・スロット・Principled値・画像テクスチャ・再接続・同時編集・双方向）
 ├─ tests/test_pose.py        Pose Mode ボーン Transform 同期テスト（Location/Rotation/Scale 双方向・複数 Bone・接続中に追加した Bone・再接続・無通信）
 ├─ tests/test_armature.py    Armature / Bone 構造同期テスト（接続中の Armature 新規作成・Bone 追加/削除/Rename・head/tail/roll・parent/connected・Edit Mode 中の保留・再接続・Pose 連携）
+├─ tests/test_skinning.py    Vertex Group / Skinning 同期テスト（Automatic Weights・Weight Paint・Group 追加/Rename/削除・Armature Modifier・相手側メッシュの変形一致・Weight Paint 中の保留・再接続）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    インターネット越し ROOM コード参加の公開手順・実機テスト手順
@@ -39,6 +40,7 @@ FreebirdCollabo/
 ├─ docs/material-sync-v0.7.md マテリアル同期（Issue #2: 同期範囲・メッセージ・ループ防止・実機確認手順）
 ├─ docs/pose-sync-v0.8.md    Pose Mode ボーン Transform 同期（同期範囲・ループ防止・再接続・実機確認手順）
 └─ docs/armature-sync-v0.9.md Armature / Bone 構造同期（Issue #5: 同期範囲・Edit Mode 衝突時の扱い・Pose との順序・実機確認手順）
+└─ docs/skinning-sync-v0.10.md Vertex Group / Skinning 同期（Issue #6: 同期範囲・Weight Paint 中の扱い・Armature Modifier の参照解決・実機確認手順）
 ```
 
 ## セットアップ（両 PC で同じ）
@@ -64,9 +66,9 @@ FreebirdCollabo/
 
 ## 同期しているもの / していないもの
 
-同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、**Pose Mode のボーン Transform**（Armature の Pose Bone の Location / Rotation / Scale と Rotation Mode をボーン名で対応付けて双方向同期。変わったボーンだけ最大 15Hz。docs/pose-sync-v0.8.md）、**Armature / Bone 構造**（接続中に新規作成した Armature は相手側にも実 Armature として生成。Edit Bone の追加 / 削除 / Rename（名前ベースなので削除＋作成として届く）、head / tail / roll、parent / connected を双方向同期。Edit Mode 中もリアルタイム、最大 5Hz。相手が同じ Armature を Edit Mode 中なら抜けるまで保留、両側が同時に構造を変えた場合は後に Edit Mode を抜けた側が勝つ。docs/armature-sync-v0.9.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
+同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、**Pose Mode のボーン Transform**（Armature の Pose Bone の Location / Rotation / Scale と Rotation Mode をボーン名で対応付けて双方向同期。変わったボーンだけ最大 15Hz。docs/pose-sync-v0.8.md）、**Armature / Bone 構造**（接続中に新規作成した Armature は相手側にも実 Armature として生成。Edit Bone の追加 / 削除 / Rename（名前ベースなので削除＋作成として届く）、head / tail / roll、parent / connected を双方向同期。Edit Mode 中もリアルタイム、最大 5Hz。相手が同じ Armature を Edit Mode 中なら抜けるまで保留、両側が同時に構造を変えた場合は後に Edit Mode を抜けた側が勝つ。docs/armature-sync-v0.9.md）、**Vertex Group / Skinning**（Mesh の Vertex Group の作成 / 削除 / Rename、各頂点の Weight（Weight Paint Mode 中もリアルタイム、Automatic Weights の結果も）、Armature Modifier とその Armature オブジェクト参照・主要設定を Mesh データと一緒に双方向同期。相手側でも Pose に合わせてメッシュが変形する。相手が同じ Mesh を Weight Paint / Edit 中なら抜けるまで保留、両側が同時に変えた場合は後に抜けた側が勝つ。docs/skinning-sync-v0.10.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
 
-同期しない（MVP 非目標）: 任意の Shader Node Graph（Principled BSDF 以外のシェーダー、プロシージャルノード、Mapping、Custom Node Group）、Geometry Nodes、Compositor、World Shader、Armature の Bone 構造以外のリグ設定（Constraints / IK / Drivers / Weight Paint / Vertex Group / Armature Modifier / Custom Shape / Bone Collection の詳細 / Rigify）/ アニメーション（Keyframe / Action / NLA）、法線 / モディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
+同期しない（MVP 非目標）: 任意の Shader Node Graph（Principled BSDF 以外のシェーダー、プロシージャルノード、Mapping、Custom Node Group）、Geometry Nodes、Compositor、World Shader、Armature の Bone 構造・Skinning 以外のリグ設定（Constraints / IK / Drivers / Bone Envelope の形状 / Custom Shape / Bone Collection の詳細 / Rigify）/ アニメーション（Keyframe / Action / NLA）、法線 / Armature 以外のモディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
 
 ## テスト
 
@@ -82,6 +84,7 @@ python3 tests/test_materials.py direct  # material sync (same modes as above; "u
 python3 tests/test_glb.py direct    # GLB import during a session (same modes as above)
 python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync (Issue #5)
+python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync (Issue #6)
 ```
 
 ホスト / ゲスト 2 プロセス（+ relay）を起動し、Create → Join → 正本共有 → Cube 移動の双方向同期 → 新規オブジェクト → 選択 / ツール presence → ホスト保存 までを自動検証する（PASS 済み）。

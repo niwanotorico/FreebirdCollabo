@@ -32,7 +32,7 @@ MAT_HZ = 5.0  # max material / material-slot checks per second
 POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.9.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) sync need it on BOTH sides
+ADDON_VERSION = "0.10.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) sync need it on BOTH sides
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
             "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links"}
@@ -139,6 +139,10 @@ class CollabSession:
         self._pending_data = {}  # obj name -> payload waiting until the object leaves local Edit Mode
         self._pending_parent = {}  # child name -> parent name not yet present
         self._bones_sent = {}  # armature obj name -> bone list last sent (for the change summary in the log)
+        # skinning (Issue #6): vertex groups / weights / Armature modifiers ride inside the MESH payload
+        self.skin_meta = {}  # mesh obj name -> digest of vertex group names + Armature modifiers last sent or applied
+        self._dirty_meta = set()  # mesh names whose Object (not geometry) was updated: group add / remove / rename land here
+        self._pending_mods = {}  # mesh obj name -> Armature modifier list whose armature object is not here yet
         self._sent_images = set()  # image ids already pushed to the room this session
         self._snapshot_images = set()  # image ids that were in the .blend snapshot (sent as host / received as guest)
         self._waiting_tex = {}  # image id -> {material names} waiting for that texture
@@ -228,6 +232,9 @@ class CollabSession:
         self._pending_data.clear()
         self._pending_parent.clear()
         self._bones_sent.clear()
+        self.skin_meta.clear()
+        self._dirty_meta.clear()
+        self._pending_mods.clear()
         self._sent_images.clear()
         self._snapshot_images.clear()
         self._waiting_tex.clear()
@@ -273,6 +280,8 @@ class CollabSession:
                     if isinstance(idb, bpy.types.Object):
                         if u.is_updated_geometry:
                             session._dirty.add(idb.name)
+                        elif idb.type == "MESH" and not u.is_updated_transform:
+                            session._dirty_meta.add(idb.name)  # vertex group add / remove / rename: no geometry flag
                         if idb.type == "ARMATURE":  # a posed bone updates the object (transform / geometry)
                             session._dirty_pose.add(idb.name)
                     elif isinstance(idb, bpy.types.Armature):
@@ -558,10 +567,12 @@ class CollabSession:
         for ob in self._iter_objects():
             try:
                 self.data_digest[ob.name] = object_data.quick_digest(ob)
+                self._note_skin(ob)
             except Exception as e:
                 _log(f"digest failed for {ob.name}: {e}")
         self._dirty.clear()
         self._dirty_data.clear()
+        self._dirty_meta.clear()
         self._snapshot_materials()
         self._snapshot_poses()
 
@@ -603,6 +614,8 @@ class CollabSession:
                 self.pose_state.pop(n, None)
                 self._pending_pose.pop(n, None)
                 self._bones_sent.pop(n, None)
+                self.skin_meta.pop(n, None)
+                self._pending_mods.pop(n, None)
         self.known = current
         if changed:
             self._send(make("xform", objs=changed))
@@ -624,6 +637,7 @@ class CollabSession:
             self._log_once(f"{ob.name} ({ob.type}) sent as placeholder: unsupported type or over the live-sync size limit")
         else:
             self.data_digest[ob.name] = object_data.quick_digest(ob)
+            self._note_skin(ob)
         try:
             mats = object_data.serialize_materials(ob)
             self._send_images(mats)
@@ -636,8 +650,13 @@ class CollabSession:
             mats = []
         parent = ob.parent.name if ob.parent else None
         self._send(make("obj_add", name=ob.name, type=ob.type, payload=payload, m=m, parent=parent, mats=mats))
+        if ob.type == "ARMATURE" and ob.pose is not None:
+            # an armature that is already posed when first seen (duplicated from a posed rig, posed within the same
+            # tick): an empty baseline makes the next pose check send every bone once, right after this obj_add
+            self.pose_state[ob.name] = {}
         _log(f"sent obj_add {ob.name} ({ob.type}, {object_data.payload_bytes(payload) // 1024} KB{', parent ' + parent if parent else ''}"
-             f"{', ' + str(len(payload['data'].get('bones') or [])) + ' bones' if payload.get('type') == 'ARMATURE' else ''})")  # [2/4] send
+             f"{', ' + str(len(payload['data'].get('bones') or [])) + ' bones' if payload.get('type') == 'ARMATURE' else ''}"
+             f"{', skin: ' + object_data.skin_summary(payload['data']) if payload.get('type') == 'MESH' and (payload['data'].get('vg') or payload['data'].get('mods')) else ''})")  # [2/4] send
         self._next_data_t[ob.name] = time.time() + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
 
     def _apply_mats(self, ob, mats, from_uid):
@@ -703,12 +722,24 @@ class CollabSession:
         With 3+ peers a later joiner may lack one; img_need recovers that."""
         return img_id in self._snapshot_images
 
+    def _note_skin(self, ob):
+        """Record the mesh's current vertex groups + Armature modifiers as "in sync" (cheap change gate for the sweep)."""
+        if ob.type == "MESH":
+            self.skin_meta[ob.name] = object_data.skin_meta_digest(ob)
+
+    def _skin_changed(self, ob):
+        """True when the vertex group names / Armature modifiers differ from what we last sent or applied (no weights)."""
+        try:
+            return ob.type == "MESH" and object_data.skin_meta_digest(ob) != self.skin_meta.get(ob.name)
+        except Exception:
+            return False
+
     def _check_peer_versions(self, now):
         for p in self.peers.values():
             if p.version is None and not p.ver_warned and now - p.joined_at > VER_TIMEOUT:
                 p.ver_warned = True
                 _log(f"WARNING: peer {p.name} sent no add-on version in {VER_TIMEOUT:.0f}s: they run an add-on older "
-                     f"than 0.7.0. Material sync needs v0.7+, pose sync v0.8+ and armature / bone sync v0.9+ on BOTH PCs; "
+                     f"than 0.7.0. Material sync needs v0.7+, pose sync v0.8+, armature / bone sync v0.9+ and skinning v0.10+ on BOTH PCs; "
                      f"transform / mesh still work")
 
     # ------------------------------------------------------------------
@@ -1026,9 +1057,16 @@ class CollabSession:
                 d = ob.data
                 if d is not None and (type(d).__name__, d.name) in wanted:
                     names.add(ob.name)
-        # objects being edited locally: bmesh edits are cheap to re-check and must not be missed
+        # vertex group added / removed / renamed (Object update without a geometry flag): cheap gate before a full digest
+        if self._dirty_meta:
+            meta, self._dirty_meta = self._dirty_meta, set()
+            for name in meta:
+                ob = bpy.data.objects.get(name)
+                if ob is not None and self._skin_changed(ob):
+                    names.add(name)
+        # objects being edited / weight painted locally: cheap to re-check and must not be missed
         for ob in bpy.data.objects:
-            if ob.mode == "EDIT" and not ob.name.startswith(IGNORE_PREFIXES):
+            if ob.mode in ("EDIT", "WEIGHT_PAINT") and not ob.name.startswith(IGNORE_PREFIXES):
                 names.add(ob.name)
             elif ob.type == "GREASEPENCIL" and ob.mode in (
                 "PAINT_GREASE_PENCIL", "SCULPT_GREASE_PENCIL", "VERTEX_GREASE_PENCIL", "WEIGHT_GREASE_PENCIL"
@@ -1039,6 +1077,8 @@ class CollabSession:
             self._last_sweep_t = now
             for ob in self._iter_objects():
                 if ob.type in ("LIGHT", "CAMERA", "EMPTY", "FONT", "ARMATURE"):  # armature: bone structure
+                    names.add(ob.name)
+                elif ob.type == "MESH" and ob.name in self.known and self._skin_changed(ob):  # groups / modifiers: no weights
                     names.add(ob.name)
         return names
 
@@ -1085,7 +1125,10 @@ class CollabSession:
             state = self.pose_state.setdefault(name, {})
             for bone, st in cur_pose.items():
                 state.setdefault(bone, st)
+        elif ob.type == "MESH" and self._skin_changed(ob):
+            _log(f"sent skin {name} ({object_data.skin_summary(payload['data'])})")
         self.data_digest[name] = digest
+        self._note_skin(ob)
         self._send(make("obj_data", name=name, payload=payload))
         self._next_data_t[name] = now + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
         return "sent"
@@ -1107,7 +1150,7 @@ class CollabSession:
     @staticmethod
     def _editing_data_locally(ob):
         if ob.type == "MESH":
-            return ob.mode == "EDIT"
+            return ob.mode != "OBJECT"  # Edit / Weight Paint / Sculpt...: a rebuild under the user's brush is not safe
         if ob.type == "GREASEPENCIL":
             return ob.mode != "OBJECT"
         if ob.type == "ARMATURE":  # bones can only be written from Edit Mode: wait until we can borrow the view layer
@@ -1126,6 +1169,8 @@ class CollabSession:
             return
         self.data_digest[ob.name] = object_data.quick_digest(ob)  # echo suppression
         self._dirty.discard(ob.name)
+        if ob.type == "MESH":
+            self._after_skin_apply(ob, payload)
         if ob.type == "ARMATURE":
             bones = payload.get("data", {}).get("bones") or []
             _log(f"applied armature {ob.name} ({object_data.armature_delta_summary(self._bones_sent.get(ob.name), bones)}, "
@@ -1134,6 +1179,36 @@ class CollabSession:
             self._remember_pose(ob)  # new bones start "in sync": their identity pose must not be echoed at the sender
             self._dirty_pose.discard(ob.name)
 
+    def _after_skin_apply(self, ob, payload):
+        """Bookkeeping after a MESH payload was applied: log skin changes, remember Armature modifiers whose
+        armature object has not arrived yet (resolved when it does), record the new skin meta as in sync."""
+        data = payload.get("data") or {}
+        if self._skin_changed(ob) and (data.get("vg") or data.get("mods") or ob.name in self.skin_meta):
+            _log(f"applied skin {ob.name} ({object_data.skin_summary(data)})")
+        self._note_skin(ob)
+        self._dirty_meta.discard(ob.name)
+        missing = object_data.missing_modifier_objects(data.get("mods"))
+        if missing:
+            self._pending_mods[ob.name] = data["mods"]
+            self._log_once(f"armature modifier on {ob.name} waits for {', '.join(missing)} to arrive")
+        else:
+            self._pending_mods.pop(ob.name, None)
+
+    def _resolve_pending_mods(self):
+        for name, mods in list(self._pending_mods.items()):
+            ob = bpy.data.objects.get(name)
+            if ob is None or ob.type != "MESH":
+                del self._pending_mods[name]
+            elif not object_data.missing_modifier_objects(mods):
+                del self._pending_mods[name]
+                try:
+                    object_data.apply_armature_modifiers(ob, mods)
+                    self.data_digest[name] = object_data.quick_digest(ob)
+                    self._note_skin(ob)
+                    _log(f"applied armature modifier on {name} ({object_data.skin_summary({'mods': mods})})")
+                except Exception as e:
+                    _log(f"armature modifier on {name} FAILED: {e}")
+
     def _retry_pending_data(self):
         for name in list(self._pending_data):
             ob = bpy.data.objects.get(name)
@@ -1141,10 +1216,11 @@ class CollabSession:
                 del self._pending_data[name]
             elif not self._editing_data_locally(ob):
                 payload = self._pending_data.pop(name)
-                if ob.type == "ARMATURE" and self._changed_locally(ob):
-                    # both sides restructured the same rig: the edit that finished last (ours) wins and goes out now,
-                    # instead of the remote state silently burying it (the peer applies ours, so both end up equal)
-                    _log(f"armature {name}: local Edit Mode changes win over the structure received meanwhile")
+                if ob.type in ("ARMATURE", "MESH") and self._changed_locally(ob):
+                    # both sides edited the same datablock (bones / geometry / weights): the edit that finished last
+                    # (ours) wins and goes out now, instead of the remote state silently burying it (the peer applies
+                    # ours, so both end up equal)
+                    _log(f"{ob.type.lower()} {name}: local edits win over the data received meanwhile")
                     self._dirty.add(name)
                     continue
                 self._apply_payload(ob, payload)
@@ -1210,7 +1286,10 @@ class CollabSession:
         self.known.add(name)
         self.data_digest[name] = None if payload.get("placeholder") else object_data.quick_digest(ob)
         self._dirty.discard(name)
+        if ob.type == "MESH" and not payload.get("placeholder"):
+            self._after_skin_apply(ob, payload)
         self._resolve_pending_parents()
+        self._resolve_pending_mods()
 
     def _resolve_pending_parents(self):
         for child, parent in list(self._pending_parent.items()):
@@ -1236,6 +1315,8 @@ class CollabSession:
             self.pose_state.pop(name, None)
             self._pending_pose.pop(name, None)
             self._bones_sent.pop(name, None)
+            self.skin_meta.pop(name, None)
+            self._pending_mods.pop(name, None)
             self.known.discard(name)
 
     # ------------------------------------------------------------------

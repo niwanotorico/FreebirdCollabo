@@ -64,7 +64,11 @@ def quick_digest(ob):
         me.polygons.foreach_get("loop_total", lt)
         mi = array.array("i", bytes(np * 4))
         me.polygons.foreach_get("material_index", mi)
-        return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes())
+        # skinning (Issue #6): vertex group names + armature modifiers (cheap) and the weights (a Python loop over
+        # the vertices: ~2 ms per 1000 vertices; only meshes flagged dirty / being painted get here)
+        skin = json.dumps(skin_meta(ob), separators=(",", ":")) if (ob.vertex_groups or ob.modifiers) else ""
+        weights = json.dumps(_weights(ob, me), separators=(",", ":")) if ob.vertex_groups else ""
+        return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes(), skin, weights)
     if kind == "GREASEPENCIL":
         return _grease_pencil_digest(ob.data)
     if kind == "ARMATURE":
@@ -77,7 +81,7 @@ def quick_digest(ob):
 # ----------------------------------------------------------------------
 # serialize
 # ----------------------------------------------------------------------
-def _mesh_data(me, limit=MAX_MESH_VERTS):
+def _mesh_data(me, limit=MAX_MESH_VERTS, ob=None):
     if len(me.vertices) > limit:
         return None
     data = {
@@ -92,6 +96,11 @@ def _mesh_data(me, limit=MAX_MESH_VERTS):
         uv.data.foreach_get("uv", buf)
         data["uv"] = [round(x, 5) for x in buf]  # per loop, same loop order from_pydata recreates
         data["uvn"] = uv.name
+    if ob is not None and ob.type == "MESH":  # skinning (Issue #6): vertex groups + weights + armature modifiers
+        meta = skin_meta(ob)
+        data["vg"] = meta["vg"]
+        data["w"] = _weights(ob, me)
+        data["mods"] = meta["mods"]
     return data
 
 
@@ -211,7 +220,7 @@ def serialize(ob, limit=MAX_MESH_VERTS):
     if kind == "MESH":
         if ob.mode == "EDIT":
             ob.update_from_editmode()
-        data = _mesh_data(ob.data, limit)
+        data = _mesh_data(ob.data, limit, ob)
         if data is None:
             return None
     elif kind in AS_EVALUATED_MESH:
@@ -307,14 +316,17 @@ def apply(ob, payload):
     if ob.type != kind:
         return False
     if kind == "MESH":
-        if ob.mode == "EDIT":
-            return False  # caller retries later; can't rewrite a mesh that is being edited here
+        if ob.mode != "OBJECT":
+            return False  # caller retries later; can't rewrite a mesh that is being edited / painted / sculpted here
         me = ob.data
         keep_uv = None
         if "uv" not in data and me.uv_layers.active is not None and len(me.uv_layers.active.data) == len(me.loops):
             keep_uv = array.array("f", bytes(len(me.loops) * 8))  # payload came from Edit Mode: keep our UVs
             me.uv_layers.active.data.foreach_get("uv", keep_uv)
             keep_uv = (me.uv_layers.active.name, keep_uv)
+        keep_w = None
+        if "vg" not in data and ob.vertex_groups:  # pre-0.10 peer: clear_geometry drops the weights, so keep ours
+            keep_w = (len(me.vertices), [g.name for g in ob.vertex_groups], _weights(ob, me))
         me.clear_geometry()
         me.from_pydata(data["v"], data.get("e", []), data["f"])
         if keep_uv and len(keep_uv[1]) == len(me.loops) * 2:
@@ -330,6 +342,12 @@ def apply(ob, payload):
             layer.data.foreach_set("uv", uv)
             me.uv_layers.active = layer
         me.update()
+        if "vg" in data:
+            apply_vertex_groups(ob, data["vg"], data.get("w") or [])
+        elif keep_w and keep_w[0] == len(me.vertices):
+            apply_vertex_groups(ob, keep_w[1], keep_w[2])
+        if "mods" in data:
+            apply_armature_modifiers(ob, data["mods"])
     elif kind == "CURVE":
         cu = ob.data
         cu.splines.clear()
@@ -427,6 +445,149 @@ def _apply_grease_pencil(gp, data):
 
 def payload_bytes(payload):
     return len(json.dumps(payload, separators=(",", ":")))
+
+
+# ----------------------------------------------------------------------
+# skinning (Issue #6). Rides inside the MESH payload (obj_add / obj_data), because a geometry rebuild
+# (clear_geometry + from_pydata) drops the deform weights anyway:
+#   vg    vertex group names in index order            (identity = NAME, like bones: a rename = delete + create)
+#   w     one flat list per group: [vertex index, weight, vertex index, weight, ...] (weights rounded to 4 places)
+#   mods  Armature modifiers only: {n: name, i: stack index, ob: armature object name | null, vg: vertex_group,
+#         uvg / env / pv / inv / mm / sv: use_vertex_groups / use_bone_envelopes / use_deform_preserve_volume /
+#         invert_vertex_group / use_multi_modifier / show_viewport}
+# Other modifier types are not synced (non-goal); their stack position is respected when we can.
+# ----------------------------------------------------------------------
+_ARM_MOD_KEYS = (("vg", "vertex_group"), ("uvg", "use_vertex_groups"), ("env", "use_bone_envelopes"),
+                 ("pv", "use_deform_preserve_volume"), ("inv", "invert_vertex_group"),
+                 ("mm", "use_multi_modifier"), ("sv", "show_viewport"))
+
+
+def skin_meta(ob):
+    """Vertex group names + Armature modifier settings of a mesh object (cheap: no weights). None for other types."""
+    if ob.type != "MESH":
+        return None
+    mods = []
+    for i, m in enumerate(ob.modifiers):
+        if m.type != "ARMATURE":
+            continue
+        item = {"n": m.name, "i": i, "ob": m.object.name if m.object is not None else None}
+        for key, attr in _ARM_MOD_KEYS:
+            item[key] = getattr(m, attr)
+        mods.append(item)
+    return {"vg": [g.name for g in ob.vertex_groups], "mods": mods}
+
+
+def skin_meta_digest(ob):
+    meta = skin_meta(ob)
+    return _digest_bytes(json.dumps(meta, separators=(",", ":"))) if meta is not None else None
+
+
+def _weights(ob, me):
+    """Per vertex group (index order): flat [vertex index, weight, ...]."""
+    n = len(ob.vertex_groups)
+    if not n:
+        return []
+    out = [[] for _ in range(n)]
+    for v in me.vertices:
+        vi = v.index
+        for g in v.groups:
+            gi = g.group
+            if 0 <= gi < n:
+                out[gi].append(vi)
+                out[gi].append(round(g.weight, 4))
+    return out
+
+
+def apply_vertex_groups(ob, names, weights):
+    """Make ob.vertex_groups exactly `names` (by name) and assign `weights` (see _weights). The mesh has just been
+    rebuilt, so there are no stale assignments; a group that keeps its name keeps its index where Blender allows."""
+    vgs = ob.vertex_groups
+    wanted = set(names)
+    for g in list(vgs):
+        if g.name not in wanted:
+            vgs.remove(g)
+    for name in names:
+        if name not in vgs:
+            g = vgs.new(name=name)
+            if g.name != name:
+                g.name = name
+    nv = len(ob.data.vertices)
+    for name, flat in zip(names, weights):
+        vg = vgs.get(name)
+        if vg is None or not flat:
+            continue
+        by = {}  # weight value -> [vertex indices]: VertexGroup.add takes one weight per call
+        for i in range(0, len(flat) - 1, 2):
+            vi = flat[i]
+            if 0 <= vi < nv:
+                by.setdefault(flat[i + 1], []).append(vi)
+        for w, idx in by.items():
+            vg.add(idx, w, "REPLACE")
+
+
+def apply_armature_modifiers(ob, mods):
+    """Make the object's Armature modifiers match `mods` (other modifier types are left alone).
+    Returns the names of referenced armature objects that are not here (yet): the caller retries when they arrive."""
+    wanted = {it["n"] for it in mods}
+    for m in list(ob.modifiers):
+        if m.type == "ARMATURE" and m.name not in wanted:
+            ob.modifiers.remove(m)
+    missing = []
+    for it in mods:
+        m = ob.modifiers.get(it["n"])
+        if m is not None and m.type != "ARMATURE":  # another type squats on the name: remote naming authority
+            ob.modifiers.remove(m)
+            m = None
+        if m is None:
+            m = ob.modifiers.new(it["n"], "ARMATURE")
+            if m is None:
+                continue
+            if m.name != it["n"]:
+                m.name = it["n"]
+        target_name = it.get("ob")
+        if target_name:
+            target = bpy.data.objects.get(target_name)
+            if target is None or target.type != "ARMATURE":
+                missing.append(target_name)
+            elif m.object != target:
+                m.object = target
+        elif m.object is not None:
+            m.object = None
+        for key, attr in _ARM_MOD_KEYS:
+            if key in it:
+                _set(m, attr, it[key])
+        idx = it.get("i")
+        if idx is not None:
+            try:
+                cur = ob.modifiers.find(m.name)
+                if 0 <= idx < len(ob.modifiers) and cur != idx:
+                    ob.modifiers.move(cur, idx)
+            except Exception:
+                pass
+    return missing
+
+
+def missing_modifier_objects(mods):
+    """Armature object names referenced by `mods` that are not in this file."""
+    out = []
+    for it in mods or []:
+        name = it.get("ob")
+        if name:
+            target = bpy.data.objects.get(name)
+            if target is None or target.type != "ARMATURE":
+                out.append(name)
+    return out
+
+
+def skin_summary(meta):
+    """Short human summary of a skin meta dict for the log: '3 groups (Bone, spine, arm.L); Armature -> Rig'."""
+    if not meta:
+        return "no skin"
+    names = meta.get("vg") or []
+    parts = [f"{len(names)} group{'s' if len(names) != 1 else ''}" + (f" ({', '.join(names[:6])}{'...' if len(names) > 6 else ''})" if names else "")]
+    for it in meta.get("mods") or []:
+        parts.append(f"{it['n']} -> {it.get('ob') or 'none'}")
+    return "; ".join(parts)
 
 
 # ----------------------------------------------------------------------

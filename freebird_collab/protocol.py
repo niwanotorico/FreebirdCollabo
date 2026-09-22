@@ -23,7 +23,12 @@ Message types (client -> hub -> peers):
   obj_data        {name, payload:{type, data}}                 datablock contents changed. type ARMATURE (0.9+):
                                                                data.bones = [{n, h:[3], t:[3], r, p:name|null, c}]
                                                                = Edit Bone name / head / tail / roll / parent /
-                                                               connected, parents first, matched by bone name
+                                                               connected, parents first, matched by bone name.
+                                                               type MESH (0.10+) also carries the skinning:
+                                                               data.vg = [group names], data.w = per group
+                                                               [vertex index, weight, ...], data.mods = Armature
+                                                               modifiers [{n, i, ob:armature name|null, vg, uvg,
+                                                               env, pv, inv, mm, sv}] (object_data.py)
   mat             {mat:{n, ...}}                               material created / changed. Same state dict as in
                                                                obj_add.mats; only the changed keys travel (object_data.py)
   mat_ren         {old, new}                                   material renamed (identity = session_uid on the sender)
