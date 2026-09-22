@@ -32,10 +32,11 @@ MAT_HZ = 5.0  # max material / material-slot checks per second
 POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.10.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) sync need it on BOTH sides
+ADDON_VERSION = "0.11.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) / node tree (0.11+) sync need it on BOTH sides
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
-            "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links"}
+            "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links",
+            "nt": "node tree"}
 
 
 def _log(msg):
@@ -51,6 +52,8 @@ def _describe_mat(item):
         if key in ("p", "tx"):
             names = list(item[key])
             parts.append(f"{label}: {', '.join(names) if len(names) <= 6 else f'{len(names)} inputs'}")
+        elif key == "nt":
+            parts.append(f"{label} {object_data.describe_node_tree(item[key])}")
         else:
             parts.append(label)
     return "; ".join(parts) or "name only"
@@ -739,11 +742,13 @@ class CollabSession:
             if p.version is None and not p.ver_warned and now - p.joined_at > VER_TIMEOUT:
                 p.ver_warned = True
                 _log(f"WARNING: peer {p.name} sent no add-on version in {VER_TIMEOUT:.0f}s: they run an add-on older "
-                     f"than 0.7.0. Material sync needs v0.7+, pose sync v0.8+, armature / bone sync v0.9+ and skinning v0.10+ on BOTH PCs; "
+                     f"than 0.7.0. Material sync needs v0.7+, pose sync v0.8+, armature / bone sync v0.9+, skinning v0.10+ and "
+                     f"shader node tree sync v0.11+ on BOTH PCs; "
                      f"transform / mesh still work")
 
     # ------------------------------------------------------------------
     # material sync (Issue #2): create / delete / rename, Principled BSDF values, image textures, slots
+    # node tree sync (Issue #7): the whole standard shader node graph rides in the same "mat" state under "nt"
     # ------------------------------------------------------------------
     @staticmethod
     def _iter_materials():

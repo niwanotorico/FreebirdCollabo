@@ -350,10 +350,12 @@ def run_unit():
     dst, missing = od.apply_material(item)
     assert dst != src and dst.name == "Src" and not missing
     got = od.serialize_material(dst)
-    item.pop("l")  # the receiver has no noise node: Roughness stays a plain (untouched) value there
-    assert got.pop("p").pop("Roughness") == 0.5
-    item.pop("p")
-    assert got == item, f"{got} != {item}"
+    assert got == item, f"{got} != {item}"  # 0.11+: the noise node travels too (nt), so even "l" matches
+    # a pre-0.11 peer sends no "nt": the receiver then has no noise node and Roughness stays a plain value
+    legacy = {k: v for k, v in item.items() if k != "nt"} | {"n": "SrcLegacy"}
+    leg, missing = od.apply_material(legacy)
+    assert not missing and not _bsdf("SrcLegacy").inputs["Roughness"].is_linked
+    assert od.serialize_material(leg)["p"]["Roughness"] == 0.5 and _tex_image("SrcLegacy", "Normal") is not None
     d = _bsdf("Src")
     assert d.inputs["Alpha"].links[0].from_node == d.inputs["Base Color"].links[0].from_node, "one node for colour + alpha"
     assert d.inputs["Normal"].links[0].from_node.type == "NORMAL_MAP"
@@ -369,7 +371,8 @@ def run_unit():
     d.inputs["Metallic"].default_value = 0.25
     dst.surface_render_method = "BLENDED"
     delta = od.material_delta(a, od.serialize_material(dst))
-    assert delta == {"n": "Src", "rm": "BLENDED", "p": {"Metallic": 0.25}}, delta
+    assert delta == {"n": "Src", "rm": "BLENDED", "p": {"Metallic": 0.25}, "nt": {  # 0.11+: node-level delta too
+        "d": 1, "nodes": {"Principled BSDF": {"i": {"Metallic": 0.25}, "t": "ShaderNodeBsdfPrincipled"}}}}, delta
 
     # unknown texture id -> reported missing, nothing linked
     item2 = {"n": "Lonely", "c": [1, 1, 1, 1], "p": {}, "tex": {"id": "0" * 40, "name": "nope", "ext": "png"}}

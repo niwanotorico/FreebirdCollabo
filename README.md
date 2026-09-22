@@ -1,4 +1,4 @@
-# Freebird Collaboration Layer (MVP v0.10.0)
+# Freebird Collaboration Layer (MVP v0.11.0)
 
 Blender + Freebird XR で、Gravity Sketch の Co-Creation に近い「遠隔VR共同編集」を成立させる最小プロトタイプ。
 
@@ -28,6 +28,7 @@ FreebirdCollabo/
 ├─ tests/test_data.py        オブジェクトデータ同期テスト（Edit Mode 頂点編集・全型・削除・送信量）
 ├─ tests/test_grease_pencil.py  Grease Pencil同期テスト（新規作成・描画・編集・材質・双方向）
 ├─ tests/test_materials.py   マテリアル同期テスト（作成/削除/Rename・スロット・Principled値・画像テクスチャ・再接続・同時編集・双方向）
+├─ tests/test_material_nodes.py  Shader Node Tree 同期テスト（ノード追加/削除/移動・プロパティ・リンク・Mix Shader/Emission/Glass・ColorRamp・Image Texture 参照・Node Group 非対象・同時編集・双方向）
 ├─ tests/test_pose.py        Pose Mode ボーン Transform 同期テスト（Location/Rotation/Scale 双方向・複数 Bone・接続中に追加した Bone・再接続・無通信）
 ├─ tests/test_armature.py    Armature / Bone 構造同期テスト（接続中の Armature 新規作成・Bone 追加/削除/Rename・head/tail/roll・parent/connected・Edit Mode 中の保留・再接続・Pose 連携）
 ├─ tests/test_skinning.py    Vertex Group / Skinning 同期テスト（Automatic Weights・Weight Paint・Group 追加/Rename/削除・Armature Modifier・相手側メッシュの変形一致・Weight Paint 中の保留・再接続）
@@ -41,6 +42,7 @@ FreebirdCollabo/
 ├─ docs/pose-sync-v0.8.md    Pose Mode ボーン Transform 同期（同期範囲・ループ防止・再接続・実機確認手順）
 └─ docs/armature-sync-v0.9.md Armature / Bone 構造同期（Issue #5: 同期範囲・Edit Mode 衝突時の扱い・Pose との順序・実機確認手順）
 └─ docs/skinning-sync-v0.10.md Vertex Group / Skinning 同期（Issue #6: 同期範囲・Weight Paint 中の扱い・Armature Modifier の参照解決・実機確認手順）
+└─ docs/material-node-sync-v0.11.md Shader Node Tree 同期（Issue #7: payload・差分・Image Texture 参照・対象外ノード・後方互換・実機確認手順）
 ```
 
 ## セットアップ（両 PC で同じ）
@@ -66,9 +68,9 @@ FreebirdCollabo/
 
 ## 同期しているもの / していないもの
 
-同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、**Pose Mode のボーン Transform**（Armature の Pose Bone の Location / Rotation / Scale と Rotation Mode をボーン名で対応付けて双方向同期。変わったボーンだけ最大 15Hz。docs/pose-sync-v0.8.md）、**Armature / Bone 構造**（接続中に新規作成した Armature は相手側にも実 Armature として生成。Edit Bone の追加 / 削除 / Rename（名前ベースなので削除＋作成として届く）、head / tail / roll、parent / connected を双方向同期。Edit Mode 中もリアルタイム、最大 5Hz。相手が同じ Armature を Edit Mode 中なら抜けるまで保留、両側が同時に構造を変えた場合は後に Edit Mode を抜けた側が勝つ。docs/armature-sync-v0.9.md）、**Vertex Group / Skinning**（Mesh の Vertex Group の作成 / 削除 / Rename、各頂点の Weight（Weight Paint Mode 中もリアルタイム、Automatic Weights の結果も）、Armature Modifier とその Armature オブジェクト参照・主要設定を Mesh データと一緒に双方向同期。相手側でも Pose に合わせてメッシュが変形する。相手が同じ Mesh を Weight Paint / Edit 中なら抜けるまで保留、両側が同時に変えた場合は後に抜けた側が勝つ。docs/skinning-sync-v0.10.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
+同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、**Shader Node Tree**（Blender 標準 Shader Node のノード追加 / 削除・種類・名前・位置・input 値・ノード固有プロパティ・ノード間リンク・Material Output 接続を双方向同期。Principled / Emission / Diffuse / Glass / Transparent / Mix Shader / ColorRamp / Noise / Voronoi / Wave / Mapping / Texture Coordinate / Normal Map / Bump など。Image Texture は参照（名前 / パス / Color Space）のみで画像本体は送らない。変わったノードの変わった値だけを最大 5Hz で送信。v0.10 以前の相手には従来の Principled 同期だけが届く。docs/material-node-sync-v0.11.md）、**Pose Mode のボーン Transform**（Armature の Pose Bone の Location / Rotation / Scale と Rotation Mode をボーン名で対応付けて双方向同期。変わったボーンだけ最大 15Hz。docs/pose-sync-v0.8.md）、**Armature / Bone 構造**（接続中に新規作成した Armature は相手側にも実 Armature として生成。Edit Bone の追加 / 削除 / Rename（名前ベースなので削除＋作成として届く）、head / tail / roll、parent / connected を双方向同期。Edit Mode 中もリアルタイム、最大 5Hz。相手が同じ Armature を Edit Mode 中なら抜けるまで保留、両側が同時に構造を変えた場合は後に Edit Mode を抜けた側が勝つ。docs/armature-sync-v0.9.md）、**Vertex Group / Skinning**（Mesh の Vertex Group の作成 / 削除 / Rename、各頂点の Weight（Weight Paint Mode 中もリアルタイム、Automatic Weights の結果も）、Armature Modifier とその Armature オブジェクト参照・主要設定を Mesh データと一緒に双方向同期。相手側でも Pose に合わせてメッシュが変形する。相手が同じ Mesh を Weight Paint / Edit 中なら抜けるまで保留、両側が同時に変えた場合は後に抜けた側が勝つ。docs/skinning-sync-v0.10.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
 
-同期しない（MVP 非目標）: 任意の Shader Node Graph（Principled BSDF 以外のシェーダー、プロシージャルノード、Mapping、Custom Node Group）、Geometry Nodes、Compositor、World Shader、Armature の Bone 構造・Skinning 以外のリグ設定（Constraints / IK / Drivers / Bone Envelope の形状 / Custom Shape / Bone Collection の詳細 / Rigify）/ アニメーション（Keyframe / Action / NLA）、法線 / Armature 以外のモディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
+同期しない（MVP 非目標）: Shader Node のうち Node Group の中身 / OSL Script / Custom・外部 Addon ノード / Frame / RGB Curves 等のカーブ形状 / Image Texture の画像本体、Geometry Nodes、Compositor、World Shader、Armature の Bone 構造・Skinning 以外のリグ設定（Constraints / IK / Drivers / Bone Envelope の形状 / Custom Shape / Bone Collection の詳細 / Rigify）/ アニメーション（Keyframe / Action / NLA）、法線 / Armature 以外のモディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
 
 ## テスト
 
@@ -81,6 +83,7 @@ python3 tests/test_sync.py wss      # websocket over TLS (local self-signed term
 python3 tests/test_data.py direct   # object data sync (same modes as above)
 python3 tests/test_grease_pencil.py direct  # Grease Pencil create/draw/edit sync
 python3 tests/test_materials.py direct  # material sync (same modes as above; "unit" = single-process part only)
+python3 tests/test_material_nodes.py direct  # shader node tree sync (Issue #7)
 python3 tests/test_glb.py direct    # GLB import during a session (same modes as above)
 python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync (Issue #5)

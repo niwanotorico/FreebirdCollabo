@@ -46,6 +46,8 @@ Blender 間でマテリアルの変更を双方向に同期する。既存の Tr
 
 ## 同期しないもの（Non-goal）
 
+> v0.11（Issue #7, `docs/material-node-sync-v0.11.md`）で標準 Shader Node の Node Tree 全体が同期対象になった。以下は v0.7 時点の記述。
+
 任意の Shader Node Graph の完全同期、Principled BSDF 以外のシェーダーの中身、Mapping / プロシージャルテクスチャ、Custom Node Group の中身、
 Geometry Nodes、Compositor、World Shader、Image の Paint 結果（ピクセル編集）、24 MB 超の画像。
 マテリアルは**名前**が同一性（オブジェクトと同じ）。別々の PC で同名の無関係なマテリアルを同時に作ると同じものとして扱われる。

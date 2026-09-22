@@ -600,7 +600,8 @@ def skin_summary(meta):
 #     tex    Base Color image texture    tx   {socket identifier: texture} for the other inputs
 #     l      inputs driven by something we do not sync (procedural nodes...) -> receiver leaves them alone
 #     gp     Grease Pencil style
-#   Arbitrary node graphs are NOT synced (non-goal); images themselves travel separately (img / img_need).
+#     nt     the whole standard shader node tree (0.11+, see the node tree section below); pre-0.11 peers ignore it
+#   Images themselves travel separately (img / img_need) for the Principled-connected textures only.
 # ----------------------------------------------------------------------
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
 TEX_INPUTS = ("Base Color", "Metallic", "Roughness", "Alpha", "Normal", "Emission Color")
@@ -652,9 +653,11 @@ def _base_color(mat):
     return [round(float(c), 4) for c in mat.diffuse_color]
 
 
-def _image_node(sock):
+def _image_node(sock, empty_ok=False):
     """Image Texture node feeding a socket, searching breadth-first through intermediate nodes
-    (Mix with a vertex colour, gamma, normal map, separate/combine, node groups...), or None."""
+    (Mix with a vertex colour, gamma, normal map, separate/combine, node groups...), or None.
+    empty_ok: an Image Texture node without an image counts too (the node tree sync builds the
+    node first; the image may still be on its way)."""
     if not sock.is_linked:
         return None
     queue = [sock.links[0].from_node]
@@ -664,7 +667,7 @@ def _image_node(sock):
         if node.name in seen:
             continue
         seen.add(node.name)
-        if node.type == "TEX_IMAGE" and node.image is not None:
+        if node.type == "TEX_IMAGE" and (node.image is not None or empty_ok):
             return node
         if len(seen) > 12:
             break
@@ -753,6 +756,349 @@ def _socket_value(sock):
     return None
 
 
+# ----------------------------------------------------------------------
+# shader node tree (Issue #7). The whole standard Shader Node graph of a material travels as one
+# generic payload under item["nt"] (next to the Principled-only keys above, which stay for pre-0.11 peers):
+#   nt = {"nodes": {node name: {"t": bl_idname, "l": [x, y], "lb": label, "mu": mute,
+#                                "i": {input socket identifier: value},   unlinked-or-not, every input with a value
+#                                "o": {output identifier: value},          Value / RGB nodes keep their value on the output
+#                                "pr": {property: value},                  the node's own enum / bool / int / float / string
+#                                                                          properties (noise_dimensions, blend_type, space...)
+#                                "img": {"name", "path", "cs", "src", "id"?},  Image Texture: REFERENCE only (v1), no pixels
+#                                "ramp": {"cm", "ip", "hi", "el": [[pos, [rgba]], ...]}}},  ColorRamp
+#         "links": [[from node, from socket identifier, to node, to socket identifier], ...],
+#         "x": [names of local nodes we do not sync]}   (node groups, OSL, custom / add-on nodes)
+#   A delta (material_delta) carries only the changed nodes (and inside them only the changed "i" / "pr" keys),
+#   removed node names under "del", the full link list when it changed, and "d": 1 so the receiver knows it is
+#   partial. Nodes are matched by NAME; unsupported nodes (either side) are never touched or deleted.
+# ----------------------------------------------------------------------
+_NODE_BASE_PROPS = None  # property identifiers every ShaderNode has (name, location, inputs...): not node settings
+_NT_SKIP_PROPS = {"image", "node_tree", "script", "object", "texture_mapping", "color_mapping", "image_user",
+                  "color_ramp", "mapping", "bytecode", "bytecode_hash", "socket_idname"}
+_NT_UNSUPPORTED = {"ShaderNodeGroup", "ShaderNodeCustomGroup", "ShaderNodeScript", "NodeFrame", "NodeGroupInput",
+                   "NodeGroupOutput"}
+_NT_OUTPUT_VALUE_TYPES = {"VALUE", "RGB"}  # node.type of nodes whose value lives on the output socket
+_warned_refs = set()  # (material, image name, path) already reported as unavailable here
+
+
+def _node_base_props():
+    global _NODE_BASE_PROPS
+    if _NODE_BASE_PROPS is None:
+        _NODE_BASE_PROPS = {p.identifier for p in bpy.types.ShaderNode.bl_rna.properties}
+    return _NODE_BASE_PROPS
+
+
+def node_supported(node):
+    """Standard Blender shader node we can rebuild on the other side by bl_idname."""
+    idname = node.bl_idname
+    if idname in _NT_UNSUPPORTED:
+        return False
+    return idname.startswith("ShaderNode") or idname == "NodeReroute"
+
+
+def _round_val(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, str)):
+        return v
+    if isinstance(v, float):
+        return round(v, 5)
+    try:
+        return [round(float(x), 5) for x in v]
+    except TypeError:
+        return None
+
+
+def _nt_socket_value(sock):
+    if not hasattr(sock, "default_value") or sock.hide_value:
+        return None
+    if sock.type in ("SHADER", "GEOMETRY", "CUSTOM"):
+        return None
+    try:
+        return _round_val(sock.default_value)
+    except Exception:
+        return None
+
+
+def _nt_props(node):
+    base = _node_base_props()
+    out = {}
+    for prop in node.bl_rna.properties:
+        ident = prop.identifier
+        if ident in base or ident in _NT_SKIP_PROPS or prop.is_readonly or prop.type == "POINTER" or prop.type == "COLLECTION":
+            continue
+        try:
+            v = _round_val(getattr(node, ident))
+        except Exception:
+            continue
+        if v is not None:
+            out[ident] = v
+    return out
+
+
+def _nt_image_ref(img):
+    """Reference to an image (name / path / colour space), never the pixels. "id" rides along when the
+    content hash is already known here (a texture the Principled sync shipped), so the receiver can match
+    an image that arrived under another name."""
+    if img is None:
+        return None
+    ref = {"name": img.name, "path": img.filepath_raw or img.filepath or "", "src": img.source}
+    try:
+        ref["cs"] = img.colorspace_settings.name
+    except Exception:
+        pass
+    cid = img.get("collab_id")
+    if not cid:
+        hit = _tex_cache.get(img.name)
+        if hit and hit[1] and hit[0] == _image_signature(img):
+            cid = hit[1]["id"]
+    if cid:
+        ref["id"] = cid
+    return ref
+
+
+def _nt_ramp(ramp):
+    return {"cm": ramp.color_mode, "ip": ramp.interpolation, "hi": ramp.hue_interpolation,
+            "el": [[round(float(e.position), 5), [round(float(c), 5) for c in e.color]] for e in ramp.elements]}
+
+
+def serialize_node(node):
+    state = {"t": node.bl_idname, "l": [round(float(node.location.x), 1), round(float(node.location.y), 1)]}
+    if node.label:
+        state["lb"] = node.label
+    if node.mute:
+        state["mu"] = True
+    inputs = {}
+    for sock in node.inputs:
+        v = _nt_socket_value(sock)
+        if v is not None:
+            inputs[sock.identifier] = v
+    state["i"] = inputs
+    if node.type in _NT_OUTPUT_VALUE_TYPES:
+        outs = {}
+        for sock in node.outputs:
+            v = _nt_socket_value(sock)
+            if v is not None:
+                outs[sock.identifier] = v
+        state["o"] = outs
+    props = _nt_props(node)
+    if props:
+        state["pr"] = props
+    if node.type == "TEX_IMAGE":
+        ref = _nt_image_ref(node.image)
+        state["img"] = ref if ref is not None else None
+    if node.type == "VALTORGB":
+        state["ramp"] = _nt_ramp(node.color_ramp)
+    return state
+
+
+def serialize_node_tree(tree):
+    """nt payload of a shader node tree (see the section header), or None when there is no tree."""
+    if tree is None:
+        return None
+    nodes, skipped = {}, []
+    for node in tree.nodes:
+        if node_supported(node):
+            nodes[node.name] = serialize_node(node)
+        else:
+            skipped.append(node.name)
+    links = []
+    for link in tree.links:
+        links.append([link.from_node.name, link.from_socket.identifier, link.to_node.name, link.to_socket.identifier])
+    links.sort()
+    out = {"nodes": nodes, "links": links}
+    if skipped:
+        out["x"] = sorted(skipped)
+    return out
+
+
+def node_tree_delta(prev, cur):
+    """Partial nt: changed / new nodes (with only their changed keys), removed nodes, links if changed. None = no change."""
+    if not prev:
+        return cur
+    pn, cn = prev.get("nodes") or {}, cur.get("nodes") or {}
+    nodes = {}
+    for name, state in cn.items():
+        old = pn.get(name)
+        if old is None or old.get("t") != state.get("t"):
+            nodes[name] = state
+            continue
+        sub = {}
+        for key, value in state.items():
+            if key in ("i", "pr", "o"):
+                osub = old.get(key) or {}
+                changed = {k: v for k, v in value.items() if osub.get(k) != v}
+                if changed:
+                    sub[key] = changed
+            elif old.get(key) != value:
+                sub[key] = value
+        for key in old:  # a label / mute that went back to default is simply absent now
+            if key not in state and key in ("lb", "mu"):
+                sub[key] = "" if key == "lb" else False
+        if sub:
+            sub["t"] = state["t"]
+            nodes[name] = sub
+    removed = sorted(name for name in pn if name not in cn)
+    out = {"d": 1}
+    if nodes:
+        out["nodes"] = nodes
+    if removed:
+        out["del"] = removed
+    if (prev.get("links") or []) != (cur.get("links") or []):
+        out["links"] = cur.get("links") or []
+    if (prev.get("x") or []) != (cur.get("x") or []):
+        out["x"] = cur.get("x") or []
+    return out if len(out) > 1 else None
+
+
+def describe_node_tree(nt):
+    """'nodes: Noise Texture, Mix; -Bump; links' for the log."""
+    if not nt:
+        return ""
+    parts = []
+    names = list(nt.get("nodes") or {})
+    if names:
+        parts.append(f"nodes: {', '.join(names) if len(names) <= 5 else f'{len(names)} nodes'}")
+    if nt.get("del"):
+        parts.append("-" + ", ".join(nt["del"]))
+    if "links" in nt:
+        parts.append(f"{len(nt['links'])} links")
+    return "; ".join(parts) + ("" if nt.get("d") else " (full)")
+
+
+def _resolve_image_ref(ref):
+    """Image for an nt reference: by content id, by name, else load the file if it exists here. None otherwise."""
+    if not ref:
+        return None
+    img = find_image(ref["id"]) if ref.get("id") else None
+    if img is None and ref.get("name"):
+        img = bpy.data.images.get(ref["name"])
+    if img is None and ref.get("path"):
+        path = bpy.path.abspath(ref["path"])
+        if os.path.isfile(path):
+            try:
+                img = bpy.data.images.load(path, check_existing=True)
+                if ref.get("name") and img.name != ref["name"] and ref["name"] not in bpy.data.images:
+                    img.name = ref["name"]
+            except Exception:
+                img = None
+    if img is not None and ref.get("cs"):
+        try:
+            if img.colorspace_settings.name != ref["cs"]:
+                img.colorspace_settings.name = ref["cs"]
+        except Exception:
+            pass
+    return img
+
+
+def _apply_ramp(ramp, data):
+    els = ramp.elements
+    want = data.get("el") or []
+    while len(els) < len(want):
+        els.new(want[len(els)][0])
+    while len(els) > max(len(want), 1):
+        els.remove(els[len(els) - 1])
+    for el, (pos, col) in zip(els, want):
+        _set(el, "position", pos)
+        _set(el, "color", col)
+    for key, attr in (("cm", "color_mode"), ("ip", "interpolation"), ("hi", "hue_interpolation")):
+        if key in data:
+            _set(ramp, attr, data[key])
+
+
+def apply_node(tree, name, state):
+    """Create or update one node. Returns (node, [unresolved image refs])."""
+    node = tree.nodes.get(name)
+    idname = state.get("t")
+    if node is not None and idname and node.bl_idname != idname:
+        tree.nodes.remove(node)
+        node = None
+    if node is None:
+        if not idname:
+            return None, []
+        node = tree.nodes.new(idname)
+        node.name = name
+    if "l" in state:
+        _set(node, "location", state["l"])
+    if "lb" in state:
+        _set(node, "label", state["lb"])
+    if "mu" in state:
+        _set(node, "mute", bool(state["mu"]))
+    for key, value in (state.get("pr") or {}).items():
+        if key in _NT_SKIP_PROPS:
+            continue
+        _set(node, key, value)  # enums first, so socket availability below is what the sender saw
+    for coll, key in ((node.inputs, "i"), (node.outputs, "o")):
+        values = state.get(key) or {}
+        if not values:
+            continue
+        socks = {s.identifier: s for s in coll}
+        for ident, value in values.items():
+            sock = socks.get(ident)
+            if sock is not None and hasattr(sock, "default_value"):
+                _set(sock, "default_value", value)
+    unresolved = []
+    if "img" in state and node.type == "TEX_IMAGE":
+        ref = state["img"]
+        img = _resolve_image_ref(ref)
+        if ref and img is None:
+            unresolved.append(ref)
+        elif node.image != img:
+            node.image = img
+    if "ramp" in state and node.type == "VALTORGB":
+        _apply_ramp(node.color_ramp, state["ramp"])
+    return node, unresolved
+
+
+def apply_node_tree(tree, nt):
+    """Make `tree` match the nt payload (full) or fold a delta into it. Returns [unresolved image refs].
+    Never touches nodes of unsupported types (and their links); never deletes on a delta beyond "del"."""
+    unresolved = []
+    if tree is None or not nt:
+        return unresolved
+    partial = bool(nt.get("d"))
+    nodes = nt.get("nodes") or {}
+    for name, state in nodes.items():
+        try:
+            _node, miss = apply_node(tree, name, state)
+            unresolved.extend(miss)
+        except Exception as e:
+            print(f"[collab] node {name} ({state.get('t')}) FAILED: {e}")
+    for name in nt.get("del") or []:
+        node = tree.nodes.get(name)
+        if node is not None and node_supported(node):
+            tree.nodes.remove(node)
+    remote_x = set(nt.get("x") or [])
+    if not partial:
+        for node in list(tree.nodes):
+            if node.name not in nodes and node.name not in remote_x and node_supported(node):
+                tree.nodes.remove(node)
+    if "links" in nt:
+        want = set(tuple(l) for l in nt["links"])
+        have = {}
+        for link in list(tree.links):
+            key = (link.from_node.name, link.from_socket.identifier, link.to_node.name, link.to_socket.identifier)
+            if key in want:
+                have[key] = link
+                continue
+            if node_supported(link.from_node) and node_supported(link.to_node):
+                tree.links.remove(link)  # a link between synced nodes that the sender no longer has
+        for key in sorted(want - set(have)):
+            fn, fs, tn, ts = key
+            a, b = tree.nodes.get(fn), tree.nodes.get(tn)
+            if a is None or b is None:
+                continue  # one end is a node we could not build (unsupported here)
+            out = next((s for s in a.outputs if s.identifier == fs), None)
+            inp = next((s for s in b.inputs if s.identifier == ts), None)
+            if out is None or inp is None:
+                continue
+            try:
+                tree.links.new(out, inp)
+            except Exception as e:
+                print(f"[collab] link {fn}.{fs} -> {tn}.{ts} FAILED: {e}")
+    return unresolved
+
+
 def serialize_material(mat):
     """Wire state of one material (see the section header)."""
     item = {"n": mat.name, "c": _base_color(mat)}
@@ -769,8 +1115,20 @@ def serialize_material(mat):
         item["gp"] = {k: ([round(float(x), 5) for x in getattr(gp, k)] if k.endswith("color") else getattr(gp, k))
                       for k in _GP_STYLE_KEYS if hasattr(gp, k)}
     node = _principled(mat)
-    if node is None:
-        return item
+    if node is not None:
+        _serialize_principled(node, item)
+    if not mat.is_grease_pencil:  # after the Principled part: _tex_ref() has cached the content ids the img refs reuse
+        try:
+            nt = serialize_node_tree(mat.node_tree)
+            if nt is not None:
+                item["nt"] = nt
+        except Exception:
+            pass
+    return item
+
+
+def _serialize_principled(node, item):
+    """Principled-only keys (p / tex / tx / l): what pre-0.11 peers understand."""
     values, textures, foreign = {}, {}, []
     for sock in node.inputs:
         if sock.is_linked:
@@ -797,7 +1155,6 @@ def serialize_material(mat):
         item["tx"] = textures
     if foreign:
         item["l"] = sorted(foreign)
-    return item
 
 
 def state_digest(item):
@@ -816,6 +1173,10 @@ def material_delta(prev, item):
         if key in ("p", "tx"):
             old = prev.get(key) or {}
             sub = {k: v for k, v in value.items() if old.get(k) != v}
+            if sub:
+                out[key] = sub
+        elif key == "nt":
+            sub = node_tree_delta(prev.get("nt"), value)
             if sub:
                 out[key] = sub
         elif key != "l" and prev.get(key) != value:
@@ -940,7 +1301,7 @@ def _apply_texture(mat, node, sock, tex):
                 img.colorspace_settings.name = cs
         except Exception:
             pass
-    current = _image_node(sock)
+    current = _image_node(sock, empty_ok=True)
     if current is not None:  # keep the local graph (mapping, mix, normal map...) and swap the image only
         if current.image != img:
             current.image = img
@@ -977,6 +1338,16 @@ def apply_material(item, textures_only=False):
     if gp_data and not mat.is_grease_pencil:
         bpy.data.materials.create_gpencil_data(mat)
     node = _principled(mat) if gp_data else _ensure_principled(mat)
+    if not textures_only and not gp_data and item.get("nt") and mat.node_tree is not None:
+        # 0.11+: the generic node tree first (creates / removes / rewires nodes by name), then the Principled-only
+        # keys below, which are redundant with it but harmless (same values, _set() writes nothing)
+        for ref in apply_node_tree(mat.node_tree, item["nt"]):
+            key = (item["n"], ref.get("name"), ref.get("path"))
+            if key not in _warned_refs:
+                _warned_refs.add(key)
+                print(f"[collab] material {item['n']}: image '{ref.get('name')}' ({ref.get('path') or 'no path'}) "
+                      f"is not available here; the Image Texture node stays empty (v1 syncs the reference only)")
+        node = _principled(mat)  # the tree may have replaced it
     if not textures_only:
         if gp_data and mat.grease_pencil is not None:
             for key, value in gp_data.items():

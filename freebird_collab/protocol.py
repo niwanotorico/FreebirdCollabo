@@ -30,7 +30,11 @@ Message types (client -> hub -> peers):
                                                                modifiers [{n, i, ob:armature name|null, vg, uvg,
                                                                env, pv, inv, mm, sv}] (object_data.py)
   mat             {mat:{n, ...}}                               material created / changed. Same state dict as in
-                                                               obj_add.mats; only the changed keys travel (object_data.py)
+                                                               obj_add.mats; only the changed keys travel (object_data.py).
+                                                               0.11+ adds nt = the whole standard shader node tree
+                                                               {nodes:{name:{t, l, i, pr, img, ramp...}}, links, x};
+                                                               a delta carries d:1, changed nodes, del, links. Older
+                                                               peers ignore nt; the Principled-only keys stay for them
   mat_ren         {old, new}                                   material renamed (identity = session_uid on the sender)
   mat_del         {names:[..]}                                 material deleted
   obj_mats        {name, slots:[[material|null, DATA|OBJECT]]} material slots of an object (assignment / count / link)
