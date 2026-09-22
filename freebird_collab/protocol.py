@@ -12,6 +12,7 @@ Message types (client -> hub -> peers):
   welcome         {uid, room, peers:[{uid,name,role,color}], host_uid}
   peer_join       {uid, name, role, color}
   peer_leave      {uid}
+  ver             {v}                                        add-on version, sent after welcome and to each joiner
   error           {msg}
   scene           {to, blend_b64, filename}                  host -> new guest, one-shot
   presence        {vr, head:[x,y,z,qw,qx,qy,qz]|null, hands:{L:[..7 + ray(0/1)], R:[..]},

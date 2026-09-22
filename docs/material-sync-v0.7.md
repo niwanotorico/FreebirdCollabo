@@ -73,3 +73,28 @@ blender --background --factory-startup --python tests/blender_runner.py -- tests
 5. Shader Editor で Base Color に Image Texture を繋ぐ → 画像を別のものに Open し直す → リンクを外す
 6. ゲストが Leave Room → ホストが色を変える → ゲストが Join し直す → 一致していること
 7. System Console に `[collab] ... failed` が出ていないこと。従来どおり Transform / Edit Mode / Grease Pencil / GLB Import が動くこと
+
+## v0.7.1: ログと切り分け（Relay 実機でマテリアルだけ同期しない件）
+
+Relay（Python 版・Cloudflare 版とも）はメッセージ種別を見ずに全部転送するので、Relay 経路で `mat` / `obj_mats` だけ落ちることはない。
+一番ありそうな原因は **片方の PC のアドオンが v0.6 のまま**（Transform / Mesh は v0.6 同士でも動くので気づきにくい）。v0.7.1 は参加時に `ver` を交換して、それを System Console に出す。
+
+| ログ | 意味 |
+| --- | --- |
+| `HOST room XXXX (add-on v0.7.1, N materials tracked, M peers)` / `JOINED room ...` | 自分のバージョン。`materials tracked` が 0 でないこと |
+| `peer 町田 runs add-on v0.7.1` | 相手のバージョン。**これが出れば両側 v0.7** |
+| `WARNING: peer 町田 sent no add-on version in 8s: they run an add-on older than 0.7.0 ...` | **相手が旧版**。相手側のアドオンを v0.7.1 に入れ替える |
+| `sent mat NAME (bsdf: Base Color, Roughness)` | 送信側: 変更を検知して送った。変わった項目が括弧内。`full` は初回の全量 |
+| `sent obj_mats Cube ['MatA', 'MatB']` | 送信側: スロットの変更を送った |
+| `sent material rename A -> B` / `sent material delete A` | 送信側 |
+| `applied mat NAME from u2 (...)` / `applied obj_mats ...` / `applied mat_ren ...` / `applied mat_del ...` | 受信側: 適用した |
+| `apply mat NAME FAILED: ...`（traceback 付き） | 受信側: 適用で例外。このログを貼ってください |
+| `material sync error: ...`（traceback 付き） | 送信側: 検知・送信で例外（1 回だけ出る）。presence / ping は止まらない |
+| `material NAME changed only in unsynced parts (Roughness): nothing sent` | プロシージャルノード等、同期対象外の入力しか変わっていない |
+
+### 切り分け手順
+
+1. 両 PC の System Console（Window > Toggle System Console）で `peer ... runs add-on v` を探す。無ければ WARNING が出ているはず → そちらの PC を v0.7.1 に
+2. 変更した側に `sent mat ...` が出るか。出ない → 検知の問題（`material sync error` を探す）
+3. 相手側に `applied mat ...` が出るか。出ない → 経路の問題（relay のログ、`sent` の直後の切断）
+4. `applied` は出るが見た目が変わらない → ビューポートを Material Preview にする。`apply mat ... FAILED` があれば貼る

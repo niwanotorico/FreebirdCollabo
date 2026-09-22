@@ -31,10 +31,28 @@ SWEEP_SECONDS = 2.0  # safety-net re-check of small datablocks (lights, cameras,
 MAT_HZ = 5.0  # max material / material-slot checks per second
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
+ADDON_VERSION = "0.7.1"  # exchanged in "ver" after join: material sync needs it on BOTH sides
+VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
+MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
+            "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links"}
 
 
 def _log(msg):
     print(f"[collab] {msg}")
+
+
+def _describe_mat(item):
+    """Short human summary of a material state / delta for the log: 'bsdf: Base Color, Roughness; render method'."""
+    parts = []
+    for key, label in MAT_KEYS.items():
+        if key not in item:
+            continue
+        if key in ("p", "tx"):
+            names = list(item[key])
+            parts.append(f"{label}: {', '.join(names) if len(names) <= 6 else f'{len(names)} inputs'}")
+        else:
+            parts.append(label)
+    return "; ".join(parts) or "name only"
 
 
 def _mat_to_list(m: Matrix):
@@ -76,7 +94,7 @@ def _mat_differs(a, b):
 
 
 class Peer:
-    __slots__ = ("uid", "name", "role", "color", "presence", "last_seen")
+    __slots__ = ("uid", "name", "role", "color", "presence", "last_seen", "version", "joined_at", "ver_warned")
 
     def __init__(self, uid, name, role, color):
         self.uid = uid
@@ -85,6 +103,9 @@ class Peer:
         self.color = tuple(color) if color else (1.0, 1.0, 1.0)
         self.presence = None
         self.last_seen = time.time()
+        self.version = None  # add-on version the peer reported ("ver"); None = not received (yet)
+        self.joined_at = time.time()
+        self.ver_warned = False
 
 
 class CollabSession:
@@ -332,7 +353,13 @@ class CollabSession:
                 self._sync_object_data(now)
             if now - self._last_mat_t >= 1.0 / MAT_HZ:
                 self._last_mat_t = now
-                self._sync_materials(now)
+                try:
+                    self._sync_materials(now)
+                except Exception as e:  # never take presence / ping down with a material problem
+                    import traceback
+
+                    self._log_once(f"material sync error: {e}\n{traceback.format_exc()}")
+        self._check_peer_versions(now)
         if now - self._last_presence_t >= 1.0 / PRESENCE_HZ:
             self._last_presence_t = now
             self._send_presence()
@@ -358,7 +385,8 @@ class CollabSession:
             self.error = ""
             self._snapshot_tracking()  # start tracking from the current scene
             self._install_handler()
-            _log(self.status)
+            self._send(make("ver", v=ADDON_VERSION))  # tell everyone what we speak
+            _log(f"{self.status} (add-on v{ADDON_VERSION}, {len(self.mat_names)} materials tracked, {len(self.peers)} peers)")
             self._notify()
         elif t == "error":
             self._fail(msg.get("msg", "error"))
@@ -374,7 +402,13 @@ class CollabSession:
                 self.host_uid = p.uid
             if self.role == "host":
                 self._send_scene(p.uid)
+            self._send(make("ver", to=p.uid, v=ADDON_VERSION))
             self._notify()
+        elif t == "ver":
+            p = self.peers.get(msg.get("from"))
+            if p is not None:
+                p.version = str(msg.get("v", "?"))
+                _log(f"peer {p.name} runs add-on v{p.version}")
         elif t == "peer_leave":
             self.peers.pop(msg["uid"], None)
             self._notify()
@@ -631,6 +665,13 @@ class CollabSession:
         With 3+ peers a later joiner may lack one; img_need recovers that."""
         return img_id in self._snapshot_images
 
+    def _check_peer_versions(self, now):
+        for p in self.peers.values():
+            if p.version is None and not p.ver_warned and now - p.joined_at > VER_TIMEOUT:
+                p.ver_warned = True
+                _log(f"WARNING: peer {p.name} sent no add-on version in {VER_TIMEOUT:.0f}s: they run an add-on older "
+                     f"than 0.7.0. Material sync (mat / obj_mats) needs v0.7+ on BOTH PCs; transform / mesh still work")
+
     # ------------------------------------------------------------------
     # material sync (Issue #2): create / delete / rename, Principled BSDF values, image textures, slots
     # ------------------------------------------------------------------
@@ -701,6 +742,7 @@ class CollabSession:
             if slots is not None and slots != self.slot_state.get(ob.name):
                 self.slot_state[ob.name] = slots
                 self._send(make("obj_mats", name=ob.name, slots=slots))
+                _log(f"sent obj_mats {ob.name} {[n for n, _ in slots]}")
 
     def _send_material_if_changed(self, mat, full=False):
         """Send what changed since the last sent / applied state (only the changed Principled inputs,
@@ -714,10 +756,12 @@ class CollabSession:
         self._mat_state[mat.name] = item
         out = object_data.material_delta(prev, item) if prev else item
         if len(out) == 1:
-            return False  # only things we do not sync changed (e.g. a procedural node was plugged in)
+            _log(f"material {mat.name} changed only in unsynced parts ({', '.join(item.get('l') or [])}): nothing sent")
+            return False
         self._send_images([out])
         self._send(make("mat", mat=out))
         self._mat_sent_t[mat.name] = time.time()
+        _log(f"sent mat {mat.name} ({_describe_mat(out)}{', full' if prev is None else ''})")
         return True
 
     def _forget_material(self, name):
@@ -754,8 +798,11 @@ class CollabSession:
         try:
             mat, missing = object_data.apply_material(item)
         except Exception as e:
-            _log(f"apply material {name} failed: {e}")
+            import traceback
+
+            _log(f"apply mat {name} FAILED: {e}\n{traceback.format_exc()}")
             return
+        _log(f"applied mat {name} from {msg.get('from')} ({_describe_mat(item)}{', waiting for texture' if missing else ''})")
         self._note_textures(item)
         self._remember_material(mat)
         self._want_textures([item], missing, msg.get("from"), f"material {mat.name}")
@@ -777,7 +824,8 @@ class CollabSession:
             return
         mat = bpy.data.materials.get(old)
         if mat is None:
-            return  # unknown here; its state arrives under the new name
+            _log(f"mat_ren {old} -> {new}: {old} not here; its state will arrive under the new name")
+            return
         squatter = bpy.data.materials.get(new)
         if squatter is not None and squatter != mat:  # remote naming authority, same as objects
             mat.user_remap(squatter)
@@ -789,6 +837,7 @@ class CollabSession:
             mat.name = new
         self._renamed_material(old, new)
         self._remember_material(mat)
+        _log(f"applied mat_ren {old} -> {mat.name}")
 
     def _apply_mat_del(self, names):
         for name in names:
@@ -797,6 +846,7 @@ class CollabSession:
                 self.mat_names.pop(object_data.material_uid(mat), None)
                 bpy.data.materials.remove(mat)
             self._forget_material(name)
+        _log(f"applied mat_del {', '.join(names)}")
         for ob in self._iter_objects():  # slots that pointed at it are now empty on both sides
             if ob.name in self.slot_state:
                 self.slot_state[ob.name] = object_data.serialize_slots(ob)
@@ -804,12 +854,14 @@ class CollabSession:
     def _apply_obj_mats(self, msg):
         ob = bpy.data.objects.get(msg.get("name", ""))
         if ob is None:
+            _log(f"obj_mats for unknown object {msg.get('name')}: ignored")
             return
         try:
             object_data.apply_slots(ob, msg.get("slots"))
         except Exception as e:
-            _log(f"material slots for {ob.name}: {e}")
+            _log(f"apply obj_mats {ob.name} FAILED: {e}")
             return
+        _log(f"applied obj_mats {ob.name} {[n for n, _ in msg.get('slots') or []]}")
         self.slot_state[ob.name] = object_data.serialize_slots(ob)
         for slot in ob.material_slots:  # placeholders created for unknown names must not echo back
             if slot.material is not None and object_data.material_uid(slot.material) not in self.mat_names:
