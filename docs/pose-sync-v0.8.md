@@ -37,8 +37,10 @@ Armature の Pose Mode でボーンを動かしたら、相手の Blender でも
 
 ## 同期しないもの（Non-goal）
 
-Edit Bone の構造変更、Bone の追加 / 削除、Constraints、IK、Drivers、Weight Paint、Keyframe、Action / NLA。
-Armature オブジェクトの **新規作成** も従来どおり未対応（相手側にはプレースホルダの Empty が出る）。同じリグは事前に .blend に入れておくか、ホストがルームを作る前に用意する。
+Constraints、IK、Drivers、Weight Paint、Keyframe、Action / NLA。
+
+> v0.9.0 から Armature の **新規作成と Edit Bone の構造変更（追加 / 削除 / Rename / head / tail / roll / parent / connected）** は同期される（docs/armature-sync-v0.9.md）。
+> v0.8 時点では相手側にプレースホルダの Empty が出ていたが、v0.9 では実 Armature として生成され、そのまま Pose 同期が効く。
 
 ## テスト
 

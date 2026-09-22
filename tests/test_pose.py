@@ -7,8 +7,8 @@ Two-instance Pose Mode bone transform sync test (no VR needed).
     blender --background --factory-startup --python tests/blender_runner.py -- tests/test_pose.py direct
 
 Both sides share one rig (the guest gets it with the host's scene snapshot). Covers, in both directions:
-bone Location / Rotation (quaternion + euler) / Scale, several bones edited one after another, a bone that only
-exists on one side (ignored safely, the rest keeps syncing), guest reconnect (pose matches after rejoin),
+bone Location / Rotation (quaternion + euler) / Scale, several bones edited one after another, a bone added on one
+side during the session (structure + pose arrive, the rest keeps syncing), guest reconnect (pose matches after rejoin),
 object transform / mesh / material sync still working next to it, and that an idle session sends no pose at all.
 """
 
@@ -164,11 +164,11 @@ def run_host(mode):
         _idle(s, 0.15)
     _step(s, "g5", "guest saw all bones")
 
-    # 6. a bone only the guest has: its pose must not break anything here
-    _step(s, "g6", "guest posed its private bone")
+    # 6. a bone the guest adds: since v0.9 the structure arrives too (and then its pose)
+    _step(s, "g6", "guest posed its new bone")
+    _wait(lambda: _pb("GuestOnly") is not None and _loc("GuestOnly") == (0.0, 0.0, 9.0), 20, s, "guest bone + its pose")
     _pb("hand").scale = (0.5, 0.5, 0.5)
-    _step(s, "g6b", "guest saw hand scale after private bone")
-    assert "GuestOnly" not in bpy.data.objects["Rig"].pose.bones  # rig structure is not synced (non-goal)
+    _step(s, "g6b", "guest saw hand scale after new bone")
 
     # 7. other sync must keep working next to pose sync
     bpy.data.objects["Cube"].location = Vector((3.0, 0.0, 0.0))
@@ -243,7 +243,7 @@ def run_guest(mode):
     # 5
     _wait(lambda: all(_loc(b) == (round(0.1 * (i + 1), 3), 0.0, 0.0) for i, b in enumerate(BONES)), 20, s, "all bones")
     _write_state(g5=True)
-    # 6. add a bone only here and pose it: the host must ignore it and keep going
+    # 6. add a bone here and pose it: the host gets the bone (v0.9 armature sync) and then the pose
     bpy.context.view_layer.objects.active = rig
     rig.select_set(True)
     bpy.ops.object.mode_set(mode="EDIT")

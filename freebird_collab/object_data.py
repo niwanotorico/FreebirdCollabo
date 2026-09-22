@@ -23,7 +23,8 @@ MAX_MESH_VERTS = 100_000  # live (Edit Mode) re-sync limit
 MAX_MESH_VERTS_ADD = 300_000  # one-shot obj_add limit (GLB imports are often big)
 MAX_GP_POINTS = 100_000  # live Grease Pencil re-sync limit
 MAX_GP_POINTS_ADD = 300_000  # one-shot obj_add limit
-SUPPORTED = {"MESH", "CURVE", "FONT", "LIGHT", "CAMERA", "EMPTY", "GREASEPENCIL"}
+MAX_BONES = 4000  # armature structure sync limit (a Rigify rig is ~1000)
+SUPPORTED = {"MESH", "CURVE", "FONT", "LIGHT", "CAMERA", "EMPTY", "GREASEPENCIL", "ARMATURE"}
 AS_EVALUATED_MESH = {"SURFACE", "META"}  # no Python API to rebuild these; ship their evaluated mesh instead
 
 _GP_CURVE_TYPES = {0: "CATMULL_ROM", 1: "POLY", 2: "BEZIER", 3: "NURBS"}
@@ -66,6 +67,9 @@ def quick_digest(ob):
         return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes())
     if kind == "GREASEPENCIL":
         return _grease_pencil_digest(ob.data)
+    if kind == "ARMATURE":
+        bones = armature_bones(ob)
+        return _digest_bytes(json.dumps(bones, separators=(",", ":"))) if bones is not None else None
     payload = serialize(ob)  # other types are tiny; hashing the payload is cheap
     return _digest_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":"))) if payload else None
 
@@ -257,6 +261,11 @@ def serialize(ob, limit=MAX_MESH_VERTS):
         data = _grease_pencil_data(ob.data, gp_limit)
         if data is None:
             return None
+    elif kind == "ARMATURE":
+        bones = armature_bones(ob)
+        if bones is None:
+            return None
+        data = {"bones": bones}
     else:
         return None
     return {"type": kind, "data": data}
@@ -282,10 +291,13 @@ def new_object(name, payload):
         data = None
     elif kind == "GREASEPENCIL":
         data = bpy.data.grease_pencils.new(name)
+    elif kind == "ARMATURE":
+        data = bpy.data.armatures.new(name)
     else:
         raise ValueError(f"unsupported object type: {kind}")
     ob = bpy.data.objects.new(name, data)
-    apply(ob, payload)
+    if kind != "ARMATURE":  # bones need Edit Mode, which needs the object in the scene: the caller applies after linking
+        apply(ob, payload)
     return ob
 
 
@@ -359,6 +371,10 @@ def apply(ob, payload):
         ob.empty_display_size = data["display_size"]
     elif kind == "GREASEPENCIL":
         _apply_grease_pencil(ob.data, data)
+    elif kind == "ARMATURE":
+        if ob.mode == "EDIT" or not armature_editable():
+            return False  # caller retries later: the bones are being edited here / another object is in Edit Mode
+        apply_armature(ob, data.get("bones") or [])
     return True
 
 
@@ -878,8 +894,185 @@ def apply_materials(ob, mats):
 
 
 # ----------------------------------------------------------------------
+# armature structure (Issue #5). One bone = {"n": name, "h": head, "t": tail, "r": roll,
+# "p": parent name | None, "c": connected}, in parents-first order, all in armature space (rest pose).
+# Bones are matched by NAME on both sides (a rename therefore travels as delete + create).
+# Read from edit_bones while the armature is in Edit Mode here (live), from Bone otherwise.
+# Not synced: bone collections, deform / inherit flags, custom shapes, constraints, IK, drivers, weights.
+# ----------------------------------------------------------------------
+_EDIT_OK_MODES = ("OBJECT", "POSE")  # context modes from which we may borrow the view layer for an Edit Mode pass
+
+
+def _roll_from_bone(bone):
+    axis = bone.tail_local - bone.head_local
+    if axis.length < 1e-8:
+        return 0.0
+    try:
+        _axis, roll = bpy.types.Bone.AxisRollFromMatrix(bone.matrix_local.to_3x3(), axis=axis.normalized())
+        return float(roll)
+    except Exception:
+        return 0.0
+
+
+def _bone_item(name, head, tail, roll, parent, connected):
+    # "+ 0.0" folds -0.0 into 0.0: edit_bones and Bone disagree on the sign of zero, and the digest is text
+    return {"n": name, "h": [x + 0.0 for x in _vec(head)], "t": [x + 0.0 for x in _vec(tail)],
+            "r": round(float(roll), 4) + 0.0, "p": parent, "c": bool(connected)}
+
+
+def _parents_first(items):
+    """Deterministic (by name) parents-first order so a receiver can parent bones as it creates them
+    and so edit_bones and Bone (which list bones in different orders) produce the same digest."""
+    items = sorted(items, key=lambda it: it["n"])
+    by_name = {it["n"]: it for it in items}
+    out, seen = [], set()
+
+    def visit(it, depth=0):
+        if it["n"] in seen or depth > 256:
+            return
+        parent = by_name.get(it["p"]) if it["p"] else None
+        if parent is not None:
+            visit(parent, depth + 1)
+        seen.add(it["n"])
+        out.append(it)
+
+    for it in items:
+        visit(it)
+    return out
+
+
+def armature_bones(ob):
+    """Bone list of an armature object (see the section header), or None for other objects / over the limit."""
+    if ob.type != "ARMATURE" or ob.data is None:
+        return None
+    arm = ob.data
+    items = []
+    if ob.mode == "EDIT":
+        bones = arm.edit_bones
+        if len(bones) > MAX_BONES:
+            return None
+        for eb in bones:
+            items.append(_bone_item(eb.name, eb.head, eb.tail, eb.roll, eb.parent.name if eb.parent else None, eb.use_connect))
+    else:
+        bones = arm.bones
+        if len(bones) > MAX_BONES:
+            return None
+        for b in bones:
+            items.append(_bone_item(b.name, b.head_local, b.tail_local, _roll_from_bone(b),
+                                    b.parent.name if b.parent else None, b.use_connect))
+    return _parents_first(items)
+
+
+def armature_editable():
+    """True when this Blender is in a mode from which we can enter Edit Mode on an armature and come back
+    without destroying local work (Object / Pose Mode). While a mesh / curve / armature is being edited here,
+    the structure is applied once that Edit Mode ends."""
+    try:
+        return bpy.context.mode in _EDIT_OK_MODES
+    except Exception:
+        return False
+
+
+def _edit_armature(ob, fn):
+    """Run fn(armature) with `ob` in Edit Mode, then put the view layer back the way it was
+    (active object, selection, and the previous object's mode - e.g. Pose Mode on the same rig)."""
+    vl = bpy.context.view_layer
+    prev_active = vl.objects.active
+    prev_mode = prev_active.mode if prev_active is not None else "OBJECT"
+    prev_sel = [o for o in vl.objects if o.select_get(view_layer=vl)]
+    try:
+        if bpy.context.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        for o in prev_sel:  # multi-object Edit Mode would pull other selected armatures in with us
+            if o != ob:
+                o.select_set(False, view_layer=vl)
+        vl.objects.active = ob
+        ob.select_set(True, view_layer=vl)
+        if ob.hide_viewport or not ob.visible_get(view_layer=vl):
+            ob.hide_set(False, view_layer=vl)
+        bpy.ops.object.mode_set(mode="EDIT")
+        try:
+            fn(ob.data)
+        finally:
+            bpy.ops.object.mode_set(mode="OBJECT")
+    finally:
+        try:
+            ob.select_set(ob in prev_sel, view_layer=vl)
+            for o in prev_sel:
+                if o != ob:
+                    o.select_set(True, view_layer=vl)
+            if prev_active is not None and prev_active.name in bpy.data.objects:
+                vl.objects.active = prev_active
+                if prev_mode != "OBJECT":
+                    bpy.ops.object.mode_set(mode=prev_mode)
+        except Exception:
+            pass
+
+
+def _apply_bones(arm, items):
+    """Make arm.edit_bones match `items` in place: extra bones are removed, missing ones created,
+    head / tail / roll / parent / connected written only where they differ (pose channels of bones
+    that keep their name survive the edit session, so the peer's pose is untouched)."""
+    ebs = arm.edit_bones
+    wanted = {it["n"]: it for it in items}
+    for eb in list(ebs):
+        if eb.name not in wanted:
+            ebs.remove(eb)
+    for it in items:
+        if it["n"] not in ebs:
+            eb = ebs.new(it["n"])
+            if eb.name != it["n"]:  # (cannot happen after the removal above; keep remote naming authority anyway)
+                eb.name = it["n"]
+            eb.head, eb.tail = it["h"], it["t"]
+    # disconnect / reparent first: a connected child follows its parent's tail, so parents must be right
+    # before heads and tails are written (parents-first order from the sender)
+    for it in items:
+        eb = ebs[it["n"]]
+        parent = ebs.get(it["p"]) if it["p"] else None
+        if parent is not None and parent == eb:
+            parent = None
+        if eb.parent != parent or (eb.use_connect and not it["c"]):
+            if eb.use_connect:
+                eb.use_connect = False
+            if eb.parent != parent:
+                eb.parent = parent
+    for it in items:
+        eb = ebs[it["n"]]
+        _set(eb, "head", it["h"])
+        _set(eb, "tail", it["t"])
+        if abs(float(eb.roll) - float(it["r"])) > 1e-4:
+            eb.roll = it["r"]
+    for it in items:
+        eb = ebs[it["n"]]
+        if it["c"] and eb.parent is not None and not eb.use_connect:
+            eb.use_connect = True  # snaps head to the parent's tail (already equal: the sender's rig is consistent)
+
+
+def apply_armature(ob, items):
+    """Write a bone list onto an armature object (must be linked in the scene, caller checked armature_editable())."""
+    _edit_armature(ob, lambda arm: _apply_bones(arm, items))
+
+
+def armature_delta_summary(prev, cur):
+    """Short human summary of what changed between two bone lists, for the log."""
+    if prev is None or cur is None:
+        return f"{len(cur or [])} bones"
+    a, b = {it["n"]: it for it in prev}, {it["n"]: it for it in cur}
+    added, removed = sorted(set(b) - set(a)), sorted(set(a) - set(b))
+    changed = sorted(n for n in set(a) & set(b) if a[n] != b[n])
+    parts = []
+    if added:
+        parts.append(f"+{', '.join(added[:5])}{'...' if len(added) > 5 else ''}")
+    if removed:
+        parts.append(f"-{', '.join(removed[:5])}{'...' if len(removed) > 5 else ''}")
+    if changed:
+        parts.append(f"~{', '.join(changed[:5])}{'...' if len(changed) > 5 else ''}")
+    return "; ".join(parts) or "no change"
+
+
+# ----------------------------------------------------------------------
 # pose bones (Issue: Pose Mode transform sync). Bones are matched by NAME;
-# the rig itself (Edit Bones, constraints, drivers, keyframes) is not synced.
+# constraints, drivers and keyframes are not synced (the structure is: see above).
 # ----------------------------------------------------------------------
 _ROT_ATTR = {"QUATERNION": "rotation_quaternion", "AXIS_ANGLE": "rotation_axis_angle"}  # anything else: rotation_euler
 

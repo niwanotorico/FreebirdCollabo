@@ -32,7 +32,7 @@ MAT_HZ = 5.0  # max material / material-slot checks per second
 POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.8.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) sync need it on BOTH sides
+ADDON_VERSION = "0.9.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) sync need it on BOTH sides
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
             "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links"}
@@ -138,6 +138,7 @@ class CollabSession:
         self._next_data_t = {}  # obj name -> earliest time the next obj_data may go out
         self._pending_data = {}  # obj name -> payload waiting until the object leaves local Edit Mode
         self._pending_parent = {}  # child name -> parent name not yet present
+        self._bones_sent = {}  # armature obj name -> bone list last sent (for the change summary in the log)
         self._sent_images = set()  # image ids already pushed to the room this session
         self._snapshot_images = set()  # image ids that were in the .blend snapshot (sent as host / received as guest)
         self._waiting_tex = {}  # image id -> {material names} waiting for that texture
@@ -226,6 +227,7 @@ class CollabSession:
         self._next_data_t.clear()
         self._pending_data.clear()
         self._pending_parent.clear()
+        self._bones_sent.clear()
         self._sent_images.clear()
         self._snapshot_images.clear()
         self._waiting_tex.clear()
@@ -274,7 +276,8 @@ class CollabSession:
                         if idb.type == "ARMATURE":  # a posed bone updates the object (transform / geometry)
                             session._dirty_pose.add(idb.name)
                     elif isinstance(idb, bpy.types.Armature):
-                        session._dirty_arm.add(idb.name)
+                        session._dirty_arm.add(idb.name)  # pose check
+                        session._dirty_data.add(("Armature", idb.name))  # bone structure check (leaving Edit Mode tags it)
                     elif isinstance(idb, data_types):
                         session._dirty_data.add((type(idb).__name__, idb.name))
                     elif isinstance(idb, bpy.types.Material):
@@ -597,6 +600,7 @@ class CollabSession:
                 self.slot_state.pop(n, None)
                 self.pose_state.pop(n, None)
                 self._pending_pose.pop(n, None)
+                self._bones_sent.pop(n, None)
         self.known = current
         if changed:
             self._send(make("xform", objs=changed))
@@ -701,7 +705,8 @@ class CollabSession:
             if p.version is None and not p.ver_warned and now - p.joined_at > VER_TIMEOUT:
                 p.ver_warned = True
                 _log(f"WARNING: peer {p.name} sent no add-on version in {VER_TIMEOUT:.0f}s: they run an add-on older "
-                     f"than 0.7.0. Material sync needs v0.7+ and pose sync needs v0.8+ on BOTH PCs; transform / mesh still work")
+                     f"than 0.7.0. Material sync needs v0.7+, pose sync v0.8+ and armature / bone sync v0.9+ on BOTH PCs; "
+                     f"transform / mesh still work")
 
     # ------------------------------------------------------------------
     # material sync (Issue #2): create / delete / rename, Principled BSDF values, image textures, slots
@@ -957,6 +962,11 @@ class CollabSession:
             return False
         prev = self.pose_state.get(ob.name)
         delta = object_data.pose_delta(prev, cur)
+        if delta and prev is not None and ob.mode != "EDIT":
+            # a bone that was just added / renamed here must reach the peer as structure (obj_data) BEFORE its pose,
+            # or the peer skips the pose as "bone not in this rig". Throttled structure = pose waits for the next tick
+            if self._sync_one_object_data(ob, time.time()) == "wait":
+                return False
         self.pose_state[ob.name] = cur
         if not delta or prev is None:  # first sight of a rig = baseline only (the peer has the same rig from the snapshot)
             return False
@@ -1025,7 +1035,7 @@ class CollabSession:
         if now - self._last_sweep_t >= SWEEP_SECONDS:
             self._last_sweep_t = now
             for ob in self._iter_objects():
-                if ob.type in ("LIGHT", "CAMERA", "EMPTY", "FONT"):
+                if ob.type in ("LIGHT", "CAMERA", "EMPTY", "FONT", "ARMATURE"):  # armature: bone structure
                     names.add(ob.name)
         return names
 
@@ -1037,28 +1047,45 @@ class CollabSession:
             if name not in self.known:
                 continue
             ob = bpy.data.objects.get(name)
-            if ob is None or name in self._pending_data:
-                continue
-            if now < self._next_data_t.get(name, 0.0):
-                self._dirty.add(name)  # throttled: check again next round (coalesces rapid edits)
-                continue
-            try:
-                digest = object_data.quick_digest(ob)
-            except Exception as e:
-                _log(f"digest failed for {name}: {e}")
-                continue
-            if digest is None or digest == self.data_digest.get(name):
-                continue
-            try:
-                payload = object_data.serialize(ob)
-            except Exception as e:
-                self._log_once(f"serialize failed for {name}: {e}")
-                continue
-            if payload is None:
-                continue
-            self.data_digest[name] = digest
-            self._send(make("obj_data", name=name, payload=payload))
-            self._next_data_t[name] = now + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
+            if ob is not None:
+                self._sync_one_object_data(ob, now)
+
+    def _sync_one_object_data(self, ob, now):
+        """Send obj_data for one object if its data changed since the last send / apply.
+        Returns "same" | "sent" | "wait" (pending remote state or throttled: try again next round) | "skip"."""
+        name = ob.name
+        if name in self._pending_data:
+            return "wait"
+        if now < self._next_data_t.get(name, 0.0):
+            self._dirty.add(name)  # throttled: check again next round (coalesces rapid edits)
+            return "wait"
+        try:
+            digest = object_data.quick_digest(ob)
+        except Exception as e:
+            _log(f"digest failed for {name}: {e}")
+            return "skip"
+        if digest is None or digest == self.data_digest.get(name):
+            return "same"
+        try:
+            payload = object_data.serialize(ob)
+        except Exception as e:
+            self._log_once(f"serialize failed for {name}: {e}")
+            return "skip"
+        if payload is None:
+            return "skip"
+        if ob.type == "ARMATURE":
+            _log(f"sent armature {name} ({object_data.armature_delta_summary(self._bones_sent.get(name), payload['data']['bones'])})")
+            self._bones_sent[name] = payload["data"]["bones"]
+            # bones that are new here start as "in sync" at their current pose: no identity-pose message follows,
+            # and a pose they already have (rare: posed before this send) is in the delta the caller computed
+            cur_pose = object_data.serialize_pose(ob) or {}
+            state = self.pose_state.setdefault(name, {})
+            for bone, st in cur_pose.items():
+                state.setdefault(bone, st)
+        self.data_digest[name] = digest
+        self._send(make("obj_data", name=name, payload=payload))
+        self._next_data_t[name] = now + max(1.0 / DATA_HZ, object_data.payload_bytes(payload) / DATA_BUDGET_BPS)
+        return "sent"
 
     def _apply_obj_data(self, msg):
         name = msg["name"]
@@ -1077,6 +1104,8 @@ class CollabSession:
             return ob.mode == "EDIT"
         if ob.type == "GREASEPENCIL":
             return ob.mode != "OBJECT"
+        if ob.type == "ARMATURE":  # bones can only be written from Edit Mode: wait until we can borrow the view layer
+            return ob.mode == "EDIT" or not object_data.armature_editable()
         return False
 
     def _apply_payload(self, ob, payload):
@@ -1088,6 +1117,13 @@ class CollabSession:
             return
         self.data_digest[ob.name] = object_data.quick_digest(ob)  # echo suppression
         self._dirty.discard(ob.name)
+        if ob.type == "ARMATURE":
+            bones = payload.get("data", {}).get("bones") or []
+            _log(f"applied armature {ob.name} ({object_data.armature_delta_summary(self._bones_sent.get(ob.name), bones)}, "
+                 f"{len(bones)} bones)")
+            self._bones_sent[ob.name] = bones
+            self._remember_pose(ob)  # new bones start "in sync": their identity pose must not be echoed at the sender
+            self._dirty_pose.discard(ob.name)
 
     def _retry_pending_data(self):
         for name in list(self._pending_data):
@@ -1095,7 +1131,21 @@ class CollabSession:
             if ob is None:
                 del self._pending_data[name]
             elif not self._editing_data_locally(ob):
-                self._apply_payload(ob, self._pending_data.pop(name))
+                payload = self._pending_data.pop(name)
+                if ob.type == "ARMATURE" and self._changed_locally(ob):
+                    # both sides restructured the same rig: the edit that finished last (ours) wins and goes out now,
+                    # instead of the remote state silently burying it (the peer applies ours, so both end up equal)
+                    _log(f"armature {name}: local Edit Mode changes win over the structure received meanwhile")
+                    self._dirty.add(name)
+                    continue
+                self._apply_payload(ob, payload)
+
+    def _changed_locally(self, ob):
+        try:
+            digest = object_data.quick_digest(ob)
+        except Exception:
+            return False
+        return ob.name in self.data_digest and digest is not None and digest != self.data_digest.get(ob.name)
 
     def _apply_xform(self, objs):
         for name, vals in objs.items():
@@ -1120,7 +1170,10 @@ class CollabSession:
             ob = None
         if ob is not None:  # already here (e.g. both sides imported the same asset): upsert instead of ignoring
             if ob.type == payload["type"] and not payload.get("placeholder"):
-                self._apply_payload(ob, payload)
+                if ob.type == "ARMATURE":
+                    self._apply_obj_data({"name": name, "payload": payload})  # may wait for local Edit Mode to end
+                else:
+                    self._apply_payload(ob, payload)
         else:
             try:
                 ob = object_data.new_object(name, payload)
@@ -1130,6 +1183,8 @@ class CollabSession:
             bpy.context.scene.collection.objects.link(ob)
             if ob.name != name:  # name collision -> keep remote naming authority
                 ob.name = name
+            if ob.type == "ARMATURE":  # bones are written in Edit Mode, possible only now that the object is in the scene
+                self._apply_obj_data({"name": ob.name, "payload": payload})
         self._apply_mats(ob, msg.get("mats"), msg.get("from"))
         parent = msg.get("parent")
         if parent:
@@ -1168,6 +1223,7 @@ class CollabSession:
             self.slot_state.pop(name, None)
             self.pose_state.pop(name, None)
             self._pending_pose.pop(name, None)
+            self._bones_sent.pop(name, None)
             self.known.discard(name)
 
     # ------------------------------------------------------------------

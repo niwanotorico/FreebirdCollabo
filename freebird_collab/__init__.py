@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Freebird Collaboration Layer",
     "author": "chikin + Claude",
-    "version": (0, 8, 0),
+    "version": (0, 9, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > COLLAB  (and Freebird XR menu via plugin)",
     "description": "Remote co-editing: shared room, host-authoritative scene, live head/hand/pointer/selection/tool presence",

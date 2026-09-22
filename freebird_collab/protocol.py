@@ -20,7 +20,10 @@ Message types (client -> hub -> peers):
   xform           {objs:{name:[16 floats]}}                  only for changed objects
   obj_add         {name, type, payload:{type, data}, m:[16], parent:name|null,
                    mats:[{n, c:[rgba], p, tex, tx, ...}|null]} (see object_data.py)
-  obj_data        {name, payload:{type, data}}                 datablock contents changed
+  obj_data        {name, payload:{type, data}}                 datablock contents changed. type ARMATURE (0.9+):
+                                                               data.bones = [{n, h:[3], t:[3], r, p:name|null, c}]
+                                                               = Edit Bone name / head / tail / roll / parent /
+                                                               connected, parents first, matched by bone name
   mat             {mat:{n, ...}}                               material created / changed. Same state dict as in
                                                                obj_add.mats; only the changed keys travel (object_data.py)
   mat_ren         {old, new}                                   material renamed (identity = session_uid on the sender)
