@@ -28,13 +28,15 @@ FreebirdCollabo/
 ├─ tests/test_data.py        オブジェクトデータ同期テスト（Edit Mode 頂点編集・全型・削除・送信量）
 ├─ tests/test_grease_pencil.py  Grease Pencil同期テスト（新規作成・描画・編集・材質・双方向）
 ├─ tests/test_materials.py   マテリアル同期テスト（作成/削除/Rename・スロット・Principled値・画像テクスチャ・再接続・同時編集・双方向）
+├─ tests/test_pose.py        Pose Mode ボーン Transform 同期テスト（Location/Rotation/Scale 双方向・複数 Bone・名前不一致の無視・再接続・無通信）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    インターネット越し ROOM コード参加の公開手順・実機テスト手順
 ├─ docs/machida-merge-v0.4.md 町田修正の統合レビュー（採用/不採用/理由）・同期対象一覧
 ├─ docs/glb-import-v0.5.md   接続中の GLB Import 同期（原因・階層/マテリアル対応・未対応事項）
 ├─ docs/textures-v0.6.md     Base Color テクスチャ＋UV の転送（画像の再送なし・未対応事項）
-└─ docs/material-sync-v0.7.md マテリアル同期（Issue #2: 同期範囲・メッセージ・ループ防止・実機確認手順）
+├─ docs/material-sync-v0.7.md マテリアル同期（Issue #2: 同期範囲・メッセージ・ループ防止・実機確認手順）
+└─ docs/pose-sync-v0.8.md    Pose Mode ボーン Transform 同期（同期範囲・ループ防止・再接続・実機確認手順）
 ```
 
 ## セットアップ（両 PC で同じ）
@@ -60,9 +62,9 @@ FreebirdCollabo/
 
 ## 同期しているもの / していないもの
 
-同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
+同期する: オブジェクトの Transform（変更分のみ 30Hz）、オブジェクトの追加・削除（GLB Import 等で一度に増えた物も。parent/child 階層、UV、マテリアルのスロット名＋Base Color 値＋**Base Color テクスチャ画像**付き。同一画像はセッション中 1 回だけ送信）、**データ内容の変更**（Mesh の頂点/面 — Edit Mode 中もリアルタイム、Curve、Grease Pencil のレイヤー/フレーム/ストローク/点とソリッド材質、Text、Light、Camera、Empty。変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり）、**マテリアル**（新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット数・スロットの Link、Principled BSDF の主要入力 — Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか、Render Method、Backface Culling、Viewport Display、Base Color / Metallic / Roughness / Alpha / Normal / Emission に繋いだ Image Texture の追加・差し替え・解除。変わった項目だけを最大 5Hz で送信。docs/material-sync-v0.7.md）、**Pose Mode のボーン Transform**（Armature の Pose Bone の Location / Rotation / Scale と Rotation Mode をボーン名で対応付けて双方向同期。変わったボーンだけ最大 15Hz。両側が同じリグを持っていることが前提。docs/pose-sync-v0.8.md）、選択、使用中ツール（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、HMD と左右コントローラーの位置回転（20Hz）、レイ。
 
-同期しない（MVP 非目標）: 任意の Shader Node Graph（Principled BSDF 以外のシェーダー、プロシージャルノード、Mapping、Custom Node Group）、Geometry Nodes、Compositor、World Shader、Armature / アニメーション、法線 / モディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
+同期しない（MVP 非目標）: 任意の Shader Node Graph（Principled BSDF 以外のシェーダー、プロシージャルノード、Mapping、Custom Node Group）、Geometry Nodes、Compositor、World Shader、Armature のリグ構造（Edit Bone / Bone 追加削除 / Constraints / IK / Drivers / Weight）/ アニメーション（Keyframe / Action / NLA）、法線 / モディファイア、Undo、3 人以上の最適化、権限管理、音声。フルデータ同期が必要になったら Multiuser 0.8.x と併用する設計余地あり（docs/research.md）。
 
 ## テスト
 

@@ -29,9 +29,10 @@ DATA_HZ = 5.0  # max obj_data checks/sends per second (per object)
 DATA_BUDGET_BPS = 1_500_000  # bytes/s per object: a 3 MB mesh is re-sent at most every 2 s while being edited
 SWEEP_SECONDS = 2.0  # safety-net re-check of small datablocks (lights, cameras, empties, text, materials)
 MAT_HZ = 5.0  # max material / material-slot checks per second
-SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats")
+POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
+SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.7.1"  # exchanged in "ver" after join: material sync needs it on BOTH sides
+ADDON_VERSION = "0.8.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) sync need it on BOTH sides
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
             "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links"}
@@ -151,6 +152,13 @@ class CollabSession:
         self._dirty_trees = set()  # pointers of shader node trees flagged by the handler (owner resolved later)
         self._last_mat_t = 0.0
         self._last_mat_sweep_t = 0.0
+        # pose sync (Pose Mode bone transforms, matched by bone name)
+        self.pose_state = {}  # armature obj name -> {bone name: state} last sent or applied
+        self._dirty_pose = set()  # armature object names flagged by the depsgraph handler
+        self._dirty_arm = set()  # Armature datablock names flagged by the handler (owner resolved later)
+        self._pending_pose = {}  # obj name -> {bone: state} waiting until the armature leaves local Edit Mode
+        self._last_pose_t = 0.0
+        self._last_pose_sweep_t = 0.0
         self._logged = set()
         self._last_data_t = 0.0
         self._last_sweep_t = 0.0
@@ -229,6 +237,10 @@ class CollabSession:
         self._mat_sent_t.clear()
         self._dirty_mats.clear()
         self._dirty_trees.clear()
+        self.pose_state.clear()
+        self._dirty_pose.clear()
+        self._dirty_arm.clear()
+        self._pending_pose.clear()
         self._logged.clear()
         self._scene_loaded_from_host = False
         self._pending_scene = None
@@ -259,6 +271,10 @@ class CollabSession:
                     if isinstance(idb, bpy.types.Object):
                         if u.is_updated_geometry:
                             session._dirty.add(idb.name)
+                        if idb.type == "ARMATURE":  # a posed bone updates the object (transform / geometry)
+                            session._dirty_pose.add(idb.name)
+                    elif isinstance(idb, bpy.types.Armature):
+                        session._dirty_arm.add(idb.name)
                     elif isinstance(idb, data_types):
                         session._dirty_data.add((type(idb).__name__, idb.name))
                     elif isinstance(idb, bpy.types.Material):
@@ -297,7 +313,7 @@ class CollabSession:
         if self.link and self.link.connected:
             self.link.send(msg)
             self.stats["tx"] += 1
-            if msg.get("t") in ("obj_data", "obj_add", "xform", "scene", "img", "mat", "mat_ren", "mat_del", "obj_mats"):
+            if msg.get("t") in ("obj_data", "obj_add", "xform", "scene", "img", "mat", "mat_ren", "mat_del", "obj_mats", "pose"):
                 n = len(json.dumps(msg, separators=(",", ":")))
                 self.stats["tx_bytes"] += n
                 bt = self.stats["tx_by_type"].setdefault(msg["t"], [0, 0])
@@ -343,6 +359,8 @@ class CollabSession:
         now = time.time()
         if self._pending_data:
             self._retry_pending_data()
+        if self._pending_pose:
+            self._retry_pending_pose()
         # a guest must not push its own (about to be replaced) scene to the host
         if self.role != "guest" or self._scene_loaded_from_host:
             if now - self._last_xform_t >= 1.0 / XFORM_HZ:
@@ -359,6 +377,14 @@ class CollabSession:
                     import traceback
 
                     self._log_once(f"material sync error: {e}\n{traceback.format_exc()}")
+            if now - self._last_pose_t >= 1.0 / POSE_HZ:
+                self._last_pose_t = now
+                try:
+                    self._sync_poses(now)
+                except Exception as e:  # a broken rig must not take presence / ping down
+                    import traceback
+
+                    self._log_once(f"pose sync error: {e}\n{traceback.format_exc()}")
         self._check_peer_versions(now)
         if now - self._last_presence_t >= 1.0 / PRESENCE_HZ:
             self._last_presence_t = now
@@ -447,6 +473,8 @@ class CollabSession:
             self._apply_mat_del(msg.get("names", []))
         elif t == "obj_mats":
             self._apply_obj_mats(msg)
+        elif t == "pose":
+            self._apply_pose(msg)
         elif t == "save":
             if self.role == "host":
                 self.save_master()
@@ -531,6 +559,7 @@ class CollabSession:
         self._dirty.clear()
         self._dirty_data.clear()
         self._snapshot_materials()
+        self._snapshot_poses()
 
     def _sync_objects(self):
         changed = {}
@@ -566,6 +595,8 @@ class CollabSession:
                 self.data_digest.pop(n, None)
                 self._next_data_t.pop(n, None)
                 self.slot_state.pop(n, None)
+                self.pose_state.pop(n, None)
+                self._pending_pose.pop(n, None)
         self.known = current
         if changed:
             self._send(make("xform", objs=changed))
@@ -670,7 +701,7 @@ class CollabSession:
             if p.version is None and not p.ver_warned and now - p.joined_at > VER_TIMEOUT:
                 p.ver_warned = True
                 _log(f"WARNING: peer {p.name} sent no add-on version in {VER_TIMEOUT:.0f}s: they run an add-on older "
-                     f"than 0.7.0. Material sync (mat / obj_mats) needs v0.7+ on BOTH PCs; transform / mesh still work")
+                     f"than 0.7.0. Material sync needs v0.7+ and pose sync needs v0.8+ on BOTH PCs; transform / mesh still work")
 
     # ------------------------------------------------------------------
     # material sync (Issue #2): create / delete / rename, Principled BSDF values, image textures, slots
@@ -867,6 +898,110 @@ class CollabSession:
             if slot.material is not None and object_data.material_uid(slot.material) not in self.mat_names:
                 self._remember_material(slot.material)
 
+
+    # ------------------------------------------------------------------
+    # pose sync: Pose Mode bone Location / Rotation / Scale, matched by bone name
+    # ------------------------------------------------------------------
+    def _iter_armatures(self):
+        for ob in self._iter_objects():
+            if ob.type == "ARMATURE" and ob.pose is not None:
+                yield ob
+
+    def _remember_pose(self, ob, bones=None):
+        """Record the current local pose (or just `bones` of it) as "in sync" (echo suppression)."""
+        cur = object_data.serialize_pose(ob)
+        if cur is None:
+            return
+        if bones is None:
+            self.pose_state[ob.name] = cur
+        else:
+            state = self.pose_state.setdefault(ob.name, {})
+            for name in bones:
+                if name in cur:
+                    state[name] = cur[name]
+        self._dirty_pose.discard(ob.name)
+
+    def _snapshot_poses(self):
+        self.pose_state = {}
+        for ob in self._iter_armatures():
+            try:
+                self._remember_pose(ob)
+            except Exception as e:
+                _log(f"pose digest failed for {ob.name}: {e}")
+        self._dirty_pose.clear()
+        self._dirty_arm.clear()
+        self._pending_pose.clear()
+
+    def _sync_poses(self, now):
+        sweep = now - self._last_pose_sweep_t >= SWEEP_SECONDS  # safety net: edits that never reach the depsgraph
+        if sweep:
+            self._last_pose_sweep_t = now
+        dirty, self._dirty_pose = self._dirty_pose, set()
+        arms, self._dirty_arm = self._dirty_arm, set()
+        for ob in self._iter_armatures():
+            if ob.name not in self.known:
+                continue  # not announced yet
+            if not (sweep or ob.mode == "POSE" or ob.name in dirty or ob.name not in self.pose_state
+                    or (arms and ob.data is not None and ob.data.name in arms)):
+                continue
+            if ob.name in self._pending_pose:
+                continue  # remote state waits for local Edit Mode to end; do not push ours over it
+            try:
+                self._send_pose_if_changed(ob)
+            except Exception as e:
+                self._log_once(f"pose sync failed for {ob.name}: {e}")
+
+    def _send_pose_if_changed(self, ob):
+        cur = object_data.serialize_pose(ob)
+        if cur is None:
+            return False
+        prev = self.pose_state.get(ob.name)
+        delta = object_data.pose_delta(prev, cur)
+        self.pose_state[ob.name] = cur
+        if not delta or prev is None:  # first sight of a rig = baseline only (the peer has the same rig from the snapshot)
+            return False
+        self._send(make("pose", name=ob.name, bones=delta))
+        names = sorted(delta)
+        _log(f"sent pose {ob.name} ({len(names)} bone{'s' if len(names) != 1 else ''}: "
+             f"{', '.join(names) if len(names) <= 6 else ', '.join(names[:6]) + ', ...'})")
+        return True
+
+    def _apply_pose(self, msg):
+        name = msg.get("name", "")
+        bones = msg.get("bones")
+        ob = bpy.data.objects.get(name)
+        if ob is None or not isinstance(bones, dict):
+            self._log_once(f"pose for unknown object {name}: ignored")
+            return
+        if ob.type != "ARMATURE":
+            self._log_once(f"pose for {name}: not an armature here ({ob.type}), ignored")
+            return
+        if ob.mode == "EDIT":  # bones are being restructured locally: apply once Edit Mode ends
+            self._pending_pose.setdefault(name, {}).update(bones)
+            return
+        self._apply_pose_now(ob, bones, msg.get("from"))
+
+    def _apply_pose_now(self, ob, bones, from_uid):
+        try:
+            applied, skipped = object_data.apply_pose(ob, bones)
+        except Exception as e:
+            import traceback
+
+            _log(f"apply pose {ob.name} FAILED: {e}\n{traceback.format_exc()}")
+            return
+        self._remember_pose(ob, applied)  # echo suppression: what we just wrote is "in sync"
+        _log(f"applied pose {ob.name} from {from_uid} ({len(applied)} bone{'s' if len(applied) != 1 else ''})")
+        if skipped:
+            self._log_once(f"pose {ob.name}: bones not in this rig ignored: {', '.join(sorted(skipped))}")
+
+    def _retry_pending_pose(self):
+        for name in list(self._pending_pose):
+            ob = bpy.data.objects.get(name)
+            if ob is None or ob.type != "ARMATURE":
+                del self._pending_pose[name]
+            elif ob.mode != "EDIT":
+                self._apply_pose_now(ob, self._pending_pose.pop(name), "peer")
+
     def _collect_dirty(self, now):
         """Names of objects whose data may have changed since we last sent/applied it."""
         names = set(self._dirty)
@@ -1031,6 +1166,8 @@ class CollabSession:
             self.data_digest.pop(name, None)
             self._pending_data.pop(name, None)
             self.slot_state.pop(name, None)
+            self.pose_state.pop(name, None)
+            self._pending_pose.pop(name, None)
             self.known.discard(name)
 
     # ------------------------------------------------------------------

@@ -875,3 +875,63 @@ def apply_materials(ob, mats):
         if me.materials[i] != mat:
             me.materials[i] = mat
     return missing
+
+
+# ----------------------------------------------------------------------
+# pose bones (Issue: Pose Mode transform sync). Bones are matched by NAME;
+# the rig itself (Edit Bones, constraints, drivers, keyframes) is not synced.
+# ----------------------------------------------------------------------
+_ROT_ATTR = {"QUATERNION": "rotation_quaternion", "AXIS_ANGLE": "rotation_axis_angle"}  # anything else: rotation_euler
+
+
+def _rot_attr(mode):
+    return _ROT_ATTR.get(mode, "rotation_euler")
+
+
+def _bone_state(pb):
+    """One pose bone's transform: rotation mode + the values of THAT mode (no conversion on either side)."""
+    mode = pb.rotation_mode
+    return {"rm": mode, "l": _vec(pb.location), "r": _vec(getattr(pb, _rot_attr(mode))), "s": _vec(pb.scale)}
+
+
+def serialize_pose(ob):
+    """{bone name: state} for every pose bone of an armature object, or None for other objects."""
+    if ob.type != "ARMATURE" or ob.pose is None:
+        return None
+    return {pb.name: _bone_state(pb) for pb in ob.pose.bones}
+
+
+def pose_delta(prev, cur):
+    """Bones whose state differs from prev (None = everything)."""
+    if not prev:
+        return dict(cur)
+    return {name: st for name, st in cur.items() if prev.get(name) != st}
+
+
+def apply_pose(ob, bones):
+    """Write bone states onto ob.pose.bones by name. Unknown bones are skipped.
+    Returns (applied names, skipped names)."""
+    applied, skipped = [], []
+    if ob.type != "ARMATURE" or ob.pose is None:
+        return applied, list(bones)
+    pbones = ob.pose.bones
+    for name, st in bones.items():
+        pb = pbones.get(name)
+        if pb is None or not isinstance(st, dict):
+            skipped.append(name)
+            continue
+        mode = st.get("rm")
+        if mode and pb.rotation_mode != mode:
+            try:
+                pb.rotation_mode = mode
+            except TypeError:
+                skipped.append(name)
+                continue
+        if "l" in st:
+            _set(pb, "location", st["l"])
+        if "r" in st:
+            _set(pb, _rot_attr(pb.rotation_mode), st["r"])
+        if "s" in st:
+            _set(pb, "scale", st["s"])
+        applied.append(name)
+    return applied, skipped

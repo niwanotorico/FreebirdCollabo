@@ -26,6 +26,9 @@ Message types (client -> hub -> peers):
   mat_ren         {old, new}                                   material renamed (identity = session_uid on the sender)
   mat_del         {names:[..]}                                 material deleted
   obj_mats        {name, slots:[[material|null, DATA|OBJECT]]} material slots of an object (assignment / count / link)
+  pose            {name, bones:{bone:{rm, l:[3], r:[3|4], s:[3]}}}  Pose Mode bone transforms of an armature object,
+                                                               changed bones only, matched by bone name. rm = rotation
+                                                               mode, r = the values of that mode (object_data.py)
   img             {id: sha1, name, ext, b64}                   image texture, once per image per session
   img_need        {to, id}                                     receiver lacks a referenced texture -> sender answers with img
   chunk           {id, i, n, d}                                 link.py splits messages > 700 KB
