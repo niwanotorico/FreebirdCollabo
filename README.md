@@ -35,17 +35,17 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 | Import | 接続中の GLB Import（階層・複数 Mesh・UV・Base Color テクスチャ付き） |
 | Presence | 選択、Active Tool（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、Freebird XR 使用時の HMD / 左右コントローラー（20Hz）/ ポインターのレイ |
 
-### 開発ブランチで実装済み（実機確認待ち・main 未反映）
+### 開発ブランチで実装済み（main 未反映）
 
-以下は Issue ごとのブランチで実装・自動テスト済みで、実機確認のあと main に取り込む予定です。まとめて試す場合は最新の `issue-7-material-node-sync` ブランチ（v0.11.0）を使ってください。詳細はそのブランチの `docs/` を参照。
+以下は Issue ごとのブランチで実装済みで、まだ main には取り込んでいません。各機能の実機での確認状況は表の「状態」を参照してください。まとめて試す場合は最新の `issue-7-material-node-sync` ブランチ（v0.11.0）を使ってください。詳細はそのブランチの `docs/` を参照。
 
-| 分類 | 内容 | ブランチ |
-| --- | --- | --- |
-| Materials | 新規作成 / 削除 / Rename、割り当て・スロット、Principled BSDF の主要入力、各入力に繋いだ Image Texture | issue-2-material-sync |
-| Pose | Pose Mode の Pose Bone Transform（Location / Rotation / Scale / Rotation Mode） | issue-4-pose-sync |
-| Armature / Bone | 接続中の Armature 新規作成、Bone の追加 / 削除 / Rename、head / tail / roll、parent / connected | issue-5-armature-sync |
-| Skinning | Vertex Groups、各頂点の Weight、Armature Modifier、相手側でのメッシュ変形 | issue-6-skinning-sync |
-| Material Node Tree | Blender 標準 Shader Node のノード追加 / 削除・値・リンク・Material Output 接続 | issue-7-material-node-sync |
+| 分類 | 内容 | 状態 | ブランチ |
+| --- | --- | --- | --- |
+| Materials | 新規作成 / 削除 / Rename、割り当て・スロット、Principled BSDF の主要入力、各入力に繋いだ Image Texture | 実機確認済み | issue-2-material-sync |
+| Pose | Pose Mode の Pose Bone Transform（Location / Rotation / Scale / Rotation Mode） | 実機確認済み | issue-4-pose-sync |
+| Armature / Bone | 接続中の Armature 新規作成、Bone の追加 / 削除 / Rename、head / tail / roll、parent / connected | 実機確認済み（ただし接続中に新規作成した Armature / Bone は、相手側への即時反映に再接続が必要な場合あり） | issue-5-armature-sync |
+| Skinning | Vertex Groups、各頂点の Weight、Armature Modifier、相手側でのメッシュ変形 | 実機確認済み | issue-6-skinning-sync |
+| Material Node Tree | Blender 標準 Shader Node のノード追加 / 削除・値・リンク・Material Output 接続 | 実機確認済み | issue-7-material-node-sync |
 
 ## 既知の制限
 
