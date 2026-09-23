@@ -71,7 +71,7 @@ Weight Paint Mode に入ったままの Weight 変更（ライブ）、Vertex Gr
 ゲストが Weight Paint 中は保留 → ゲスト自身が塗った Weight が勝ってホストに届く、Transform 同期の並行動作、再接続後の Group / Weight / Modifier / 変形位置の一致とその後の同期、アイドル時の無通信。
 unit 部分: serialize → apply で Group / Weight / Modifier / 変形が再現、Rename / 削除 / Modifier 変更、安い meta digest が Weight では変わらず Group / Modifier で変わる、参照先 Armature が無い Modifier の保留と後からの解決、旧バージョン payload でローカル Weight が消えない、Weight Paint 中の適用拒否。
 
-確認済み: **bpy 5.0.1（headless）** で direct / relay / wss PASS。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose / test_armature）も PASS。**Blender 5.2 実機は未確認**（下の手順）。
+確認済み: **bpy 5.0.1（headless）** で direct / relay / wss PASS。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose / test_armature）も PASS。**Blender 5.2 実機で確認済み**。
 
 ### 実機（Blender 5.2）での確認手順
 

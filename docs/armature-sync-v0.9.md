@@ -79,7 +79,7 @@ Bone 追加直後の Pose（構造が先に届く）、相手が同じリグを 
 Transform / Mesh / Material 同期の並行動作、再接続後の構造＋ポーズ一致とその後の双方向同期、アイドル時の無通信。
 unit 部分: edit_bones / Bone のシリアライズ一致、差分適用での Pose 保持、connected チェーン、別オブジェクト Edit Mode 中の適用拒否、Pose Mode の復元。
 
-確認済み: **bpy 5.0.1（headless）** で direct / relay / wss すべて PASS。**Blender 5.2 実機は 1 回目 NG**（接続中の Add > Armature が相手に出ない。再入室では出る）→ 上の切り分けログと timer コンテキスト対応を入れて再確認待ち。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose）も PASS。
+確認済み: **bpy 5.0.1（headless）** で direct / relay / wss すべて PASS。**Blender 5.2 実機で確認済み**（初回の実機テストで見つかった「接続中の Add > Armature が相手に出ない」問題は、下の切り分けログと timer コンテキスト対応で解消済み）。既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb / test_pose）も PASS。
 test_pose の「片側にしか無い Bone」のケースは、構造が同期されるようになったので「追加した Bone とその Pose が届く」に変更した。
 
 

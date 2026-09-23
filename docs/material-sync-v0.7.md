@@ -64,7 +64,7 @@ blender --background --factory-startup --python tests/blender_runner.py -- tests
 再接続、同時編集の収束、アイドル時に無通信。
 
 確認済み: **bpy 5.0.1（headless）** で direct / relay / ws / wss すべて PASS、既存テスト（test_sync / test_data / test_grease_pencil / test_glb）も PASS。
-**Blender 5.2 実機では未確認**（開発環境に 5.2 が無いため）。5.2 で上の `blender --background ...` を 1 回流すのが最短の確認。
+**Blender 5.2 実機で確認済み**。
 
 ### 実機（Blender 5.2）での確認手順
 

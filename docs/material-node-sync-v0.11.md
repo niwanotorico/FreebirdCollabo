@@ -70,7 +70,7 @@ Image Texture の参照（パスが存在 → ロードされ interpolation / ex
 同じノードの別入力の同時編集、アイドル時に無通信。unit: round trip、二回目の適用が no-op、差分の中身、未知のノード種別のスキップ、同名別種別の作り直し、v0.10 以前 payload の適用。
 
 確認済み: **bpy 5.0.1（headless）** で direct / relay / ws PASS。既存テスト（test_sync / test_data / test_grease_pencil / test_glb / test_pose / test_armature / test_skinning / test_materials）も PASS。
-**Blender 5.2 実機では未確認**。
+**Blender 5.2 実機で確認済み**（Principled BSDF だけでなく、ノード構成を変更して反射系の見た目にしたケースまで同期を確認）。
 
 ### 実機（Blender 5.2）での確認手順
 

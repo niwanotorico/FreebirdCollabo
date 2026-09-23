@@ -54,7 +54,7 @@ blender --background --factory-startup --python tests/blender_runner.py -- tests
 Transform / Mesh / Material 同期が並行して動くこと、アイドル時に `pose` 無通信。
 
 確認済み: **bpy 5.0.1（headless）** で direct / relay / wss すべて PASS、既存テスト（test_sync / test_data / test_grease_pencil / test_materials / test_glb）も PASS。
-**Blender 5.2 実機では未確認**。
+**Blender 5.2 実機で確認済み**。
 
 ### 実機（Blender 5.2）での確認手順
 
