@@ -6,7 +6,7 @@ Relay URL preset test (single process, no VR).
     python3 tests/test_relay_default.py live     # + Check Relay against the real preset relay (needs internet)
 
 Checks:
-  1  Relay URL field defaults to DEFAULT_RELAY_URL, Connection defaults to RELAY
+  1  Relay URL field defaults to DEFAULT_RELAY_URL, Connection defaults to RELAY, bl_info == ADDON_VERSION
   2  create_room() / join_room(code) hand the preset URL to the session (user types only the Room Code)
   3  a user-edited Relay URL is used as-is; an empty field falls back to the preset
   4  Reset Relay URL operator restores the preset
@@ -36,7 +36,11 @@ def main():
     assert fc.DEFAULT_RELAY_URL.startswith("wss://"), fc.DEFAULT_RELAY_URL
     assert p.relay_url == fc.DEFAULT_RELAY_URL, p.relay_url
     assert p.mode == "RELAY", p.mode
-    print("PASS 1 defaults:", p.mode, p.relay_url)
+    from freebird_collab import session as sessmod
+
+    assert fc.bl_info["version"] == (0, 11, 1), fc.bl_info["version"]
+    assert sessmod.ADDON_VERSION == ".".join(map(str, fc.bl_info["version"])), sessmod.ADDON_VERSION
+    print("PASS 1 defaults:", p.mode, p.relay_url, "v" + sessmod.ADDON_VERSION)
 
     # 2/3/5 capture what the public API hands to the session
     calls = []

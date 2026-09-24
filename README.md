@@ -11,7 +11,7 @@ Pair it with Freebird XR and the same workflow can be used from inside VR.
 Freebird XR is optional.
 You can use FreebirdCollabo without a VR headset.
 
-Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につくる」体験を Blender でも成立させることを目指している公開α版です（現在 v0.11.0）。
+Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につくる」体験を Blender でも成立させることを目指している公開α版です（現在 v0.11.1）。
 
 - 本体は独立した小さな Blender アドオン `freebird_collab`（Freebird XR 本体は改変しない）
 - ホストの Blender シーンが正本（authoritative）。JOIN 時に 1 回だけ .blend を送り、以後は差分のみ同期
@@ -22,7 +22,17 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 
 > ⚠️ Public Alpha です。重要なデータは必ずバックアップを取ってから使ってください。
 
-## 同期している機能（v0.11.0）
+## はじめかた（3 ステップ）
+
+**Relay URL は最初から設定済みです。Relay URL や Check Relay は触らなくて大丈夫。同じ Room Code を入力して Join するだけでつながります。**
+
+1. **全員**：Blender の Edit > Preferences > Add-ons > Install from Disk で `freebird_collab_addon.zip` を選び、**Freebird Collaboration Layer** にチェックを入れる
+2. **ホスト（部屋を作る人）**：3D ビューで `N` キー → **COLLAB** タブ → **Create Room**。表示された **6 文字の Room Code** を Discord などで伝える
+3. **参加する人**：同じく **COLLAB** タブの **Code** 欄に、教えてもらった Room Code を入力 → **Join Room**
+
+ホストのシーンが読み込まれたら接続完了です。あとはお互いの編集がリアルタイムに反映されます。
+
+## 同期している機能（v0.11.1）
 
 すべて Blender 5.2 の実機で同期を確認済みです。
 
@@ -67,7 +77,7 @@ FreebirdCollabo/
 │   ├─ link.py               TCP クライアント（受信スレッド → メインスレッドへキュー）
 │   ├─ protocol.py           メッセージ定義（4byte 長 + JSON）
 │   └─ ws.py                 WebSocket 実装（stdlib のみ）— 無料 HTTP ホスティングに Relay を置くため
-├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.11.0。Preferences > Add-ons > Install from Disk でも入れられる）
+├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.11.1。Preferences > Add-ons > Install from Disk でも入れられる）
 ├─ freebird_plugin/
 │   └─ freebird_collab_menu.py   Freebird VR メニューに COLLAB ボタンを足すプラグイン（Freebird XR 使用時のみ）
 ├─ relay/collab_relay.py     中継サーバー（依存なし・TCP と WebSocket を同一ポートで自動判別）
@@ -100,17 +110,19 @@ FreebirdCollabo/
 
 ## セットアップ（参加する全員の PC で同じ）
 
-1. `freebird_collab` フォルダを `C:\Users\<name>\AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\` にコピー → Preferences > Add-ons で **Freebird Collaboration Layer** を有効化
-2. アドオン設定で **Display Name / My Color** を好みで設定（Connection は既定の **Relay server (room code)** のままで OK）
-   - **Relay URL は最初から設定済み**です（`wss://freebird-relay.chickenos.workers.dev`）。**通常は何も入力・変更しなくてよく、参加者同士で同じ Room Code を入れて Join するだけ**でインターネット越しに接続できます
-   - つながるか不安なときは **Check Relay** を押して `OK xxx ms` が出れば準備完了
+1. Edit > Preferences > Add-ons > Install from Disk で `freebird_collab_addon.zip` を入れて **Freebird Collaboration Layer** を有効化（または `freebird_collab` フォルダを `C:\Users\<name>\AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\` にコピーして有効化）
+2. （任意）アドオン設定で **Display Name / My Color** を好みで設定。**それ以外（Connection / Relay URL / Check Relay）は触らなくて OK** です
+   - Relay URL には既定の公開 Relay（`wss://freebird-relay.chickenos.workers.dev`）が最初から入っています。**参加者同士で同じ Room Code を入れて Join するだけ**でインターネット越しに接続できます
 3. （Freebird XR を使う場合のみ）`freebird_plugin/freebird_collab_menu.py` を `C:\Users\<name>\.freebird\plugins\` にコピー → Freebird Settings で Reload All（VR メニューの CUSTOM に Create/Join/Leave Room が出る）
 
-### 上級者向け：別の接続方法を使う場合（通常は不要）
+### 上級者向け：接続まわりの設定（通常は不要）
+
+- **つながらないとき**: アドオン設定の **Check Relay** を押して `OK xxx ms` が出るか確認。`NG` ならネットワーク（社内ネットワークやファイアウォール）を確認し、Window > Toggle System Console の `[collab]` 行を見る
 
 - **自分の Relay を使う**: Relay URL 欄を自分の Relay の URL に書き換える（`wss://...` / LAN なら `python3 relay/collab_relay.py` を動かした PC の `ws://192.168.x.x:7788`）。参加者全員が**同じ Relay URL** にする必要がある。Relay の立て方は補足資料 [`docs/internet-relay.md`](docs/internet-relay.md) を参照。欄の右の ↺ ボタン（または欄を空にする）で既定の Relay に戻る
 - **Direct (IP address)**: Connection を Direct にすると Relay を使わず、ホストがポート 7788 で待ち受ける。ゲストは Code 欄の代わりに `Host IP` 欄へ IP（LAN や Tailscale 等の VPN）を入力。LAN / デバッグ用
-- 以前のバージョンで Relay URL を自分で入力していた場合は、その値がそのまま使われる。既定の Relay にそろえたいときは ↺ ボタンを押す
+- v0.11.0 以前で Relay URL を自分で入力していた場合は、アップデート後もその値がそのまま使われる。既定の Relay にそろえたいときは ↺ ボタンを押す
+- v0.11.0 以前のアドオンには Relay URL の既定値が無い。相手が古い版のままなら、相手のアドオンも v0.11.1 に更新してもらう（同期の中身は v0.11.0 と同じなので混在しても動くが、古い版では Relay URL の手入力が必要）
 
 ## 使い方
 
