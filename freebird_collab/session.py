@@ -32,7 +32,7 @@ MAT_HZ = 5.0  # max material / material-slot checks per second
 POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.11.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) / node tree (0.11+) sync need it on BOTH sides
+ADDON_VERSION = "0.11.1"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) / node tree (0.11+) sync need it on BOTH sides
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
             "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links",
