@@ -178,6 +178,8 @@ Freebird XR は別製品で、このリポジトリには含まれていませ�
 ## FreebirdCollabo を応援する 🐔
 
 FreebirdCollabo は無料のオープンソースです。
-開発を応援していただける場合は、こちらの [Amazon ほしい物リスト](https://www.amazon.jp/hz/wishlist/ls/2MNMSWIJ1FCB6?ref_=wl_share) からどうぞ。
 
-もちろん任意です。不具合の報告や感想、まわりの人に紹介していただけることも、同じくらい励みになります。ありがとうございます！
+開発支援大歓迎です o(^▽^)o  
+[Amazon ほしい物リスト](https://www.amazon.jp/hz/wishlist/ls/2MNMSWIJ1FCB6?ref_=wl_share)
+
+不具合の報告や感想、プロジェクトの紹介も大歓迎です。
