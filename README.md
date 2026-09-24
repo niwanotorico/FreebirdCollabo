@@ -170,6 +170,13 @@ python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, 
 
 `tests/test_sync.py` launches a host and a guest process (plus a relay) and automatically verifies the full flow: Create → Join → sharing the master scene → two-way sync of moving a Cube → new objects → selection / tool presence → saving on the host. All of these pass.
 
+## License
+
+FreebirdCollabo is licensed under the **GNU General Public License v2.0 or later** (`GPL-2.0-or-later`).
+See [LICENSE](LICENSE) for the full license text. Most source files also carry an `SPDX-License-Identifier: GPL-2.0-or-later` header.
+
+Freebird XR is a separate product and is not included in this repository.
+
 ## Support FreebirdCollabo 🐔
 
 FreebirdCollabo is free and open source.

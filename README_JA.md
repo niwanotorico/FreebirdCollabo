@@ -168,6 +168,13 @@ python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, 
 
 `tests/test_sync.py` はホスト / ゲスト 2 プロセス（+ relay）を起動し、Create → Join → 正本共有 → Cube 移動の双方向同期 → 新規オブジェクト → 選択 / ツール presence → ホスト保存 までを自動検証する（PASS 済み）。
 
+## ライセンス
+
+FreebirdCollabo は **GNU General Public License v2.0 以降**（`GPL-2.0-or-later`）で公開しています。
+ライセンス全文は [LICENSE](LICENSE) を参照してください。主なソースファイルの先頭にも `SPDX-License-Identifier: GPL-2.0-or-later` を記載しています。
+
+Freebird XR は別製品で、このリポジトリには含まれていません。
+
 ## FreebirdCollabo を応援する 🐔
 
 FreebirdCollabo は無料のオープンソースです。
