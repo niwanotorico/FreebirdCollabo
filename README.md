@@ -83,9 +83,10 @@ FreebirdCollabo/
 ├─ tests/test_armature.py    Armature / Bone 構造同期テスト（接続中の Armature 新規作成・Bone 追加/削除/Rename・head/tail/roll・parent/connected・Edit Mode 中の保留・再接続・Pose 連携）
 ├─ tests/test_skinning.py    Vertex Group / Skinning 同期テスト（Automatic Weights・Weight Paint・Group 追加/Rename/削除・Armature Modifier・相手側メッシュの変形一致・Weight Paint 中の保留・再接続）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
+├─ tests/test_relay_default.py Relay URL 既定値テスト（Room Code だけで接続・自前 URL・空欄フォールバック・Reset・Direct 非影響）
 ├─ tests/test_glb_real.py    実 GLB ファイルを使った Import 同期テスト（COLLAB_GLBS でパス指定）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
-├─ docs/internet-relay.md    インターネット越し ROOM コード参加の公開手順・実機テスト手順
+├─ docs/internet-relay.md    自分で Relay を立てたい人向けの補足資料（Cloudflare Workers / quick tunnel / Python relay。通常は読まなくてよい）
 ├─ docs/machida-merge-v0.4.md 外部からの修正提案の統合レビュー（採用/不採用/理由）・同期対象一覧
 ├─ docs/glb-import-v0.5.md   接続中の GLB Import 同期（原因・階層/マテリアル対応・未対応事項）
 ├─ docs/textures-v0.6.md     Base Color テクスチャ＋UV の転送（画像の再送なし・未対応事項）
@@ -100,17 +101,25 @@ FreebirdCollabo/
 ## セットアップ（参加する全員の PC で同じ）
 
 1. `freebird_collab` フォルダを `C:\Users\<name>\AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\` にコピー → Preferences > Add-ons で **Freebird Collaboration Layer** を有効化
-2. アドオン設定で **Display Name / My Color / Connection** を設定
-   - **Relay server (room code)**（推奨）: Relay URL に `wss://...`（`docs/internet-relay.md` の手順で作った固定 URL）を入れ、**Check Relay** で OK を確認（設定は 1 回だけ）。LAN 内なら `ws://192.168.x.x:7788` で `python3 relay/collab_relay.py` を動かした PC でも可
-   - **Direct (IP address)**: ホストがポート 7788 で待ち受け。ゲストは `Host IP` 欄に IP（Tailscale 等の VPN や LAN）を入力。デバッグ用
+2. アドオン設定で **Display Name / My Color** を好みで設定（Connection は既定の **Relay server (room code)** のままで OK）
+   - **Relay URL は最初から設定済み**です（`wss://freebird-relay.chickenos.workers.dev`）。**通常は何も入力・変更しなくてよく、参加者同士で同じ Room Code を入れて Join するだけ**でインターネット越しに接続できます
+   - つながるか不安なときは **Check Relay** を押して `OK xxx ms` が出れば準備完了
 3. （Freebird XR を使う場合のみ）`freebird_plugin/freebird_collab_menu.py` を `C:\Users\<name>\.freebird\plugins\` にコピー → Freebird Settings で Reload All（VR メニューの CUSTOM に Create/Join/Leave Room が出る）
 
+### 上級者向け：別の接続方法を使う場合（通常は不要）
+
+- **自分の Relay を使う**: Relay URL 欄を自分の Relay の URL に書き換える（`wss://...` / LAN なら `python3 relay/collab_relay.py` を動かした PC の `ws://192.168.x.x:7788`）。参加者全員が**同じ Relay URL** にする必要がある。Relay の立て方は補足資料 [`docs/internet-relay.md`](docs/internet-relay.md) を参照。欄の右の ↺ ボタン（または欄を空にする）で既定の Relay に戻る
+- **Direct (IP address)**: Connection を Direct にすると Relay を使わず、ホストがポート 7788 で待ち受ける。ゲストは Code 欄の代わりに `Host IP` 欄へ IP（LAN や Tailscale 等の VPN）を入力。LAN / デバッグ用
+- 以前のバージョンで Relay URL を自分で入力していた場合は、その値がそのまま使われる。既定の Relay にそろえたいときは ↺ ボタンを押す
+
 ## 使い方
+
+Relay URL は設定済みなので、**やることは「ホストが Create Room → 全員が同じ Room Code で Join Room」だけ**です。
 
 | 手順 | ホスト | ゲスト |
 | --- | --- | --- |
 | 1 | 正本にしたい .blend を開き COLLAB パネル（または VR メニュー）で **Create Room** | |
-| 2 | パネルに出る **6 文字のルームコード**を Discord などで伝える | コードを COLLAB パネルの Code 欄に入れて **Join Room**（VR メニューの Join Room は、この欄のコードで参加） |
+| 2 | パネルに出る **6 文字の Room Code** を Discord などで伝える | その Room Code を COLLAB パネルの Code 欄に入れて **Join Room**（VR メニューの Join Room は、この欄のコードで参加） |
 | 3 | | ホストのシーンが自分の Blender に読み込まれる |
 | 4 | お互いの編集がリアルタイムに反映される。相手の選択枠・「名前 / ツール / Selected: Cube」ラベルが見える。Freebird XR を起動していれば相手の頭（ワイヤーキューブ）・手（ピラミッド）・レイも見える | |
 | 5 | **Save Master Scene** で正本を保存（ゲストが押すとホスト側で保存される） | |
@@ -134,6 +143,7 @@ python3 tests/test_glb.py direct    # GLB import during a session (same modes as
 python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
+python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, custom URL, Reset, Direct unchanged; "live" = also Check Relay)
 ```
 
 ホスト / ゲスト 2 プロセス（+ relay）を起動し、Create → Join → 正本共有 → Cube 移動の双方向同期 → 新規オブジェクト → 選択 / ツール presence → ホスト保存 までを自動検証する（PASS 済み）。VR ヘッドセットは不要。

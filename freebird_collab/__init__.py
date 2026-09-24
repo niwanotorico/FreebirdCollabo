@@ -20,6 +20,10 @@ from .session import CollabSession
 
 TICK_INTERVAL = 1.0 / 60.0
 
+# Public relay preset as the Relay URL default, so participants only type the Room Code.
+# Anyone running their own relay (docs/internet-relay.md) can overwrite the field in the preferences.
+DEFAULT_RELAY_URL = "wss://freebird-relay.chickenos.workers.dev"
+
 _session = CollabSession()
 
 
@@ -50,8 +54,12 @@ class COLLAB_Preferences(bpy.types.AddonPreferences):
     )
     relay_url: StringProperty(
         name="Relay URL",
-        description="wss://<your-relay>  (internet)   |   ws://192.168.x.x:7788  (LAN relay)   |   tcp://host:7788",
-        default="",
+        description=(
+            "Preset to the public relay; normally leave as is. "
+            "Change only for your own relay: wss://<your-relay> | ws://192.168.x.x:7788 (LAN) | tcp://host:7788. "
+            "Empty = use the preset"
+        ),
+        default=DEFAULT_RELAY_URL,
     )
     direct_port: IntProperty(name="Direct Port", default=7788, min=1, max=65535)
 
@@ -62,10 +70,12 @@ class COLLAB_Preferences(bpy.types.AddonPreferences):
         col.separator()
         col.prop(self, "mode")
         if self.mode == "RELAY":
-            col.prop(self, "relay_url")
+            row = col.row(align=True)
+            row.prop(self, "relay_url")
+            row.operator("collab.reset_relay_url", text="", icon="LOOP_BACK")
             row = col.row(align=True)
             row.operator("collab.check_relay", icon="PLUGIN")
-            row.label(text=_relay_check_result or "Set once. Users only ever type the room code.")
+            row.label(text=_relay_check_result or "Relay is preset. Just share the Room Code and Join.")
         else:
             col.prop(self, "direct_port")
 
@@ -74,12 +84,18 @@ def _prefs():
     return bpy.context.preferences.addons[__name__].preferences
 
 
+def _relay_url(p=None):
+    """Relay URL to use: the preference value, or the preset when the field was left empty."""
+    p = p or _prefs()
+    return p.relay_url.strip() or DEFAULT_RELAY_URL
+
+
 # ----------------------------------------------------------------------
 # public API (used by the Freebird VR-menu plugin and by tests)
 # ----------------------------------------------------------------------
 def create_room():
     p = _prefs()
-    return _session.create_room(p.mode, p.display_name, tuple(p.color), relay_url=p.relay_url, direct_port=p.direct_port)
+    return _session.create_room(p.mode, p.display_name, tuple(p.color), relay_url=_relay_url(p), direct_port=p.direct_port)
 
 
 def join_room(code_or_host=None):
@@ -92,7 +108,7 @@ def join_room(code_or_host=None):
             "DIRECT", p.display_name, tuple(p.color), direct_host=host.strip() or "127.0.0.1",
             direct_port=int(port) if port else p.direct_port,
         )
-    return _session.join_room("RELAY", p.display_name, tuple(p.color), code=target.strip().upper(), relay_url=p.relay_url)
+    return _session.join_room("RELAY", p.display_name, tuple(p.color), code=target.strip().upper(), relay_url=_relay_url(p))
 
 
 def leave_room():
@@ -166,7 +182,7 @@ class COLLAB_OT_check_relay(bpy.types.Operator):
         from .link import Link
         from .protocol import make
 
-        url = _prefs().relay_url
+        url = _relay_url()
         t0 = time.time()
         try:
             link = Link(url)
@@ -190,6 +206,19 @@ class COLLAB_OT_check_relay(bpy.types.Operator):
             result = f"NG  {e}"
         _relay_check_result = result
         self.report({"INFO"} if result.startswith("OK") else {"ERROR"}, f"Relay: {result}")
+        return {"FINISHED"}
+
+
+class COLLAB_OT_reset_relay_url(bpy.types.Operator):
+    bl_idname = "collab.reset_relay_url"
+    bl_label = "Reset Relay URL"
+    bl_description = "Put the preset relay URL back into the Relay URL field"
+
+    def execute(self, context):
+        global _relay_check_result
+        _prefs().relay_url = DEFAULT_RELAY_URL
+        _relay_check_result = ""
+        self.report({"INFO"}, f"Relay URL reset to {DEFAULT_RELAY_URL}")
         return {"FINISHED"}
 
 
@@ -223,7 +252,11 @@ class COLLAB_PT_panel(bpy.types.Panel):
             box.operator("collab.join_room", icon="LINKED")
             if s.error:
                 layout.label(text=s.error, icon="ERROR")
-            relay_txt = (p.relay_url.split("://")[-1][:28] or "relay URL not set!") if p.mode == "RELAY" else "direct (LAN)"
+            if p.mode == "RELAY":
+                url = _relay_url(p)
+                relay_txt = "default relay" if url == DEFAULT_RELAY_URL else url.split("://")[-1][:28]
+            else:
+                relay_txt = "direct (LAN)"
             layout.label(text=f"{p.display_name}  ·  {relay_txt}", icon="PREFERENCES")
             return
 
@@ -279,6 +312,7 @@ classes = (
     COLLAB_OT_save_master,
     COLLAB_OT_copy_code,
     COLLAB_OT_check_relay,
+    COLLAB_OT_reset_relay_url,
     COLLAB_PT_panel,
 )
 
