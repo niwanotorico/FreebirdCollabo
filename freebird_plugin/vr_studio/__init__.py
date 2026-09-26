@@ -6,47 +6,76 @@ A Freebird XR plugin (folder plugin). Install by copying the whole `vr_studio` f
     ~/.freebird/plugins/vr_studio/      (C:\\Users\\<you>\\.freebird\\plugins\\vr_studio)
 and restarting Blender (Freebird loads plugins when it starts).
 
-v0.1 (MVP): COLOR
-    Freebird menu -> CUSTOM (plugins) -> "Color" toggles a 32-colour panel on the left hand.
-    Select objects with Freebird's select tool, point at a colour, pull the trigger: done.
-    Undo / Redo are Freebird's own (left joystick / controller buttons).
+Freebird menu -> Plugins (CUSTOM) -> "Color" / "Look" toggle their panels in the VR Studio
+area, right next to the main menu on the left hand (on the side Freebird's sub-menus open).
+    COLOR  32 colours.   Select objects, point at a colour, pull the trigger: done.
+    LOOK   8 materials (Clay / Matte / Glossy / Plastic / Metallic / Glass / Emission / Toon).
+           Independent of Color: blue + Matte -> blue + Metallic keeps the blue, and a new
+           colour keeps the Look.
+Undo / Redo are Freebird's own (left joystick / controller buttons).
 
 Independent of the freebird_collab add-on: it only edits Blender materials, and the
-collab material sync (when a room is open) carries the change to everyone.
+collab material + node tree sync (when a room is open) carries the change to everyone.
 """
 
 import os
 
-fb_info = {"name": "VR Studio", "version": (0, 1, 0)}
+fb_info = {"name": "VR Studio", "version": (0, 2, 0)}
 
 PLUGIN_ID = "vr_studio"
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 
-_panel = None
+# launcher button id, label, icon, section class (module, name). Order = bottom-to-top in the area.
+SECTIONS = [
+    ("color", "Color", "color.png", ("color_section", "ColorSection")),
+    ("look", "Look", "look.png", ("look_section", "LookSection")),
+]
+
+_area = None
+_sections = {}
 
 
-def _get_panel():
-    global _panel
-    if _panel is None:
-        from .panel import ColorPanel
+def _build():
+    """Build the area and its sections. Called at VR start (Freebird builds its own menus then too;
+    thumbnails must not be loaded from an application timer)."""
+    global _area
+    if _area is not None:
+        return _area
+    import importlib
 
-        _panel = ColorPanel()
-    return _panel
+    from .area import StudioArea
+
+    area = StudioArea()
+    for button_id, _label, _icon, (mod_name, cls_name) in SECTIONS:
+        try:
+            mod = importlib.import_module(f".{mod_name}", __name__)
+            _sections[button_id] = area.add(getattr(mod, cls_name)())
+        except Exception as e:
+            import traceback
+
+            print(f"[vr_studio] could not build {cls_name}: {e}\n{traceback.format_exc()}")
+    _area = area
+    return area
 
 
-def _toggle_color():
-    panel = _get_panel()
-    panel.attach()
-    panel.toggle()
+def _toggler(button_id):
+    def toggle():
+        area = _build()
+        area.attach()
+        section = _sections.get(button_id)
+        if section is not None:
+            area.toggle(section)
+
+    return toggle
 
 
 def _on_xr_start(self, event_name, event):
-    _get_panel().attach()  # stays hidden until the "Color" button is pressed
+    _build().attach()  # sections stay hidden until their button is pressed
 
 
 def _on_xr_end(self, event_name, event):
-    if _panel is not None:
-        _panel.detach()
+    if _area is not None:
+        _area.detach()
 
 
 def _icon(name):
@@ -58,24 +87,27 @@ def register():
     from bl_xr import root, xr_session
     from freebird.api import add_launcher_button
 
-    add_launcher_button(PLUGIN_ID, "color", "Color", _toggle_color, _icon("color.png"))
+    for button_id, label, icon, _cls in SECTIONS:
+        add_launcher_button(PLUGIN_ID, button_id, label, _toggler(button_id), _icon(icon))
     root.add_event_listener("fb.xr_start", _on_xr_start)
     root.add_event_listener("fb.xr_end", _on_xr_end)
     try:
         if xr_session.is_running:  # plugin (re)loaded while already in VR
-            _get_panel().attach()
+            _build().attach()
     except Exception:
         pass
 
 
 def unregister():
-    global _panel
+    global _area
     from bl_xr import root
     from freebird.api import remove_launcher_button
 
-    remove_launcher_button(PLUGIN_ID, "color")
+    for button_id, *_ in SECTIONS:
+        remove_launcher_button(PLUGIN_ID, button_id)
     root.remove_event_listener("fb.xr_start", _on_xr_start)
     root.remove_event_listener("fb.xr_end", _on_xr_end)
-    if _panel is not None:
-        _panel.detach()
-        _panel = None
+    if _area is not None:
+        _area.detach()
+    _area = None
+    _sections.clear()

@@ -142,7 +142,102 @@ def run_unit():
     rep = materials.apply_color([cob], red)
     assert rep["created"] == ["VR Stroke"] and _base(cob.material_slots[0].material) == _r3((*red, 1.0))
 
+    run_unit_looks()
     print("=== VR STUDIO UNIT: PASS ===")
+
+
+def _inp(mat, name):
+    from vr_studio.materials import _principled
+
+    v = _principled(mat).inputs[name].default_value
+    return round(v, 3) if isinstance(v, float) else _r3(v)
+
+
+def run_unit_looks():
+    import bpy
+    from vr_studio import looks, materials
+
+    blue, red = _lin("#1E88E5"), _lin("#E53935")
+    bpy.ops.mesh.primitive_cube_add(location=(0, 5, 0))
+    ob = bpy.context.active_object
+    ob.name = "LookBox"
+    ob.data.materials.clear()
+
+    # a Look on an object without material creates one; every Look is recognised again
+    rep = materials.apply_look([ob], "Matte")
+    mat = ob.material_slots[0].material
+    assert rep["created"] == ["VR LookBox"] and materials.detect_look(mat) == "Matte"
+    for name in looks.LOOK_NAMES:
+        materials.apply_look([ob], name)
+        assert materials.detect_look(mat) == name, (name, materials.detect_look(mat))
+
+    # Color and Look are independent, in both orders
+    materials.apply_color([ob], blue)
+    for name in looks.LOOK_NAMES:
+        materials.apply_look([ob], name)
+        assert _base(mat) == _r3((*blue, 1.0)), name  # the colour survives every Look
+        assert _r3(mat.diffuse_color[:3]) == _r3(blue)
+    materials.apply_look([ob], "Glass")
+    materials.apply_color([ob], red)
+    assert materials.detect_look(mat) == "Glass" and _inp(mat, "Transmission Weight") == 1.0
+    assert round(mat.diffuse_color[3], 2) == 0.35 and mat.use_raytrace_refraction  # see-through in Solid mode
+    materials.apply_look([ob], "Matte")  # nothing of Glass is left behind
+    assert _inp(mat, "Transmission Weight") == 0.0 and mat.diffuse_color[3] == 1.0 and not mat.use_raytrace_refraction
+    assert _base(mat) == _r3((*red, 1.0))
+
+    # Emission glows in the current colour, and follows a later colour change
+    materials.apply_look([ob], "Emission")
+    assert _inp(mat, "Emission Strength") == looks.EMISSION_STRENGTH and _inp(mat, "Emission Color") == _r3((*red, 1.0))
+    materials.apply_color([ob], blue)
+    assert _inp(mat, "Emission Color") == _r3((*blue, 1.0))
+    materials.apply_look([ob], "Plastic")
+    assert _inp(mat, "Emission Strength") == 0.0
+
+    # Toon: its own node chain feeds the output, Principled kept (unplugged) as the colour holder
+    materials.apply_look([ob], "Toon")
+    tree = mat.node_tree
+    out = next(n for n in tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
+    assert out.inputs["Surface"].links[0].from_node.name == looks.TOON_PREFIX + "Emit"
+    tint = tree.nodes[looks.TOON_PREFIX + "Tint"]
+    b_col = next(s for s in tint.inputs if s.identifier == "B_Color")
+    assert _r3(b_col.default_value) == _r3((*blue, 1.0))
+    materials.apply_color([ob], red)  # a colour change reaches the toon tint
+    assert _r3(b_col.default_value) == _r3((*red, 1.0)) and materials.detect_look(mat) == "Toon"
+    ramp = tree.nodes[looks.TOON_PREFIX + "Bands"].color_ramp
+    assert ramp.interpolation == "CONSTANT" and len(ramp.elements) == 3
+    materials.apply_look([ob], "Clay")  # leaving Toon removes its nodes and plugs the Principled back in
+    assert not any(n.name.startswith(looks.TOON_PREFIX) for n in tree.nodes)
+    assert out.inputs["Surface"].links[0].from_node.type == "BSDF_PRINCIPLED" and _base(mat) == _r3((*red, 1.0))
+
+    # a texture driving Roughness wins over the Look (only unplugged sockets are written)
+    img = tree.nodes.new("ShaderNodeTexImage")
+    tree.links.new(img.outputs["Color"], materials._principled(mat).inputs["Roughness"])
+    materials.apply_look([ob], "Glossy")
+    assert materials._principled(mat).inputs["Roughness"].is_linked and _inp(mat, "Coat Weight") == 1.0
+
+    # a material built around another shader becomes a Principled material with that colour
+    odd = bpy.data.materials.new("OnlyEmission")
+    materials._ensure_node_tree(odd)
+    t = odd.node_tree
+    t.nodes.clear()
+    e = t.nodes.new("ShaderNodeEmission")
+    e.inputs["Color"].default_value = (*blue, 1.0)
+    o = t.nodes.new("ShaderNodeOutputMaterial")
+    t.links.new(e.outputs[0], o.inputs["Surface"])
+    materials.set_material_look(odd, "Metallic")
+    assert materials.detect_look(odd) == "Metallic" and _base(odd) == _r3((*blue, 1.0))
+    assert o.inputs["Surface"].links[0].from_node.type == "BSDF_PRINCIPLED"
+
+    # copy-on-write applies to Looks too
+    bpy.ops.mesh.primitive_cube_add(location=(0, 8, 0))
+    other = bpy.context.active_object
+    other.data.materials.append(mat)
+    rep = materials.apply_look([other], "Metallic")
+    assert len(rep["copied"]) == 1 and materials.detect_look(mat) == "Glossy"
+    # Grease Pencil materials keep their colour-only behaviour
+    gp = bpy.data.materials.new("GPL")
+    bpy.data.materials.create_gpencil_data(gp)
+    assert materials.set_material_look(gp, "Metallic") is False
 
 
 # ----------------------------------------------------------------------
@@ -157,7 +252,8 @@ def _freebird_dir():
 
 
 def run_ui():
-    """Build the real panel with Freebird's bl_xr, raycast a swatch like the laser does, press it."""
+    """Build the real Studio area with Freebird's own UI code (bl_xr + Freebird's main menu),
+    check where it sits next to the main menu, raycast tiles like the laser does, press them."""
     fb = _freebird_dir()
     if fb is None:
         print("=== VR STUDIO UI: SKIPPED (set FREEBIRD_XR_DIR to Freebird's freebird_xr folder) ===")
@@ -167,57 +263,95 @@ def run_ui():
     from mathutils import Vector
 
     import bl_xr
+    from bl_xr import Image
     from bl_xr.utils import raycast
-    from bl_xr.utils.event_utils import has_pointer_event_listeners
 
-    from vr_studio.panel import ColorPanel, PAD, CELL, SWATCH
+    Image.base_dir = fb
+    import freebird  # noqa: F401  (registers Freebird's settings the main menu reads)
+    from freebird.ui import main_menu as mm
+
     from vr_studio import materials
+    from vr_studio.area import SIDE_GAP, StudioArea
+    from vr_studio.color_section import SWATCH, ColorSection
+    from vr_studio.look_section import TILE, LookSection
 
     for ob in bpy.context.view_layer.objects:
         ob.select_set(ob.name == "Cube")
+    bpy.context.view_layer.objects.active = bpy.data.objects["Cube"]
     bpy.data.objects["Cube"].data.materials.clear()
 
-    panel = ColorPanel()
-    panel.attach()
-    assert panel.node.parent is bl_xr.root and not panel.node.style["visible"]
-    panel.toggle()
-    assert panel.node.style["visible"]
-    assert len(panel.grid.child_nodes) == 32
+    area = StudioArea()
+    color = area.add(ColorSection())
+    look = area.add(LookSection())
+    area.attach()
+    assert area.node.parent is bl_xr.root and not color.node.style["visible"]
+    area.toggle(color)
+    area.toggle(look)
+    assert color.visible and look.visible and len(color.tiles) == 32 and len(look.tiles) == 8
+    # stacking: Color at the bottom, Look right above it
+    assert color.node.position.y == 0 and abs(look.node.position.y - (color.height + 0.006)) < 1e-6
 
-    # swatch index 18 = row 2 (vivid), col 2 = "Yellow"
-    idx = 18
-    sw = panel.grid.child_nodes[idx]
-    assert sw.color_name == "Yellow", sw.color_name
-    centre = sw.local_to_world_point(Vector((SWATCH / 2, SWATCH / 2, 0)))
-    node, point, _ = raycast(centre + Vector((0, 0, 0.5)), Vector((0, 0, -1)), object_raycast=False, ui_raycast=True)
-    assert node is sw, f"laser hit {node} instead of the Yellow swatch"
-    assert has_pointer_event_listeners(node)
+    # placement: RIGHT of Freebird's main menu (right-handed), bottom-aligned, slides past an open sub-menu
+    for sub in list(mm.submenus.values()) + [mm.submenu_custom, mm.mirror_panel]:
+        sub.style["visible"] = False
+    left, right, bottom, others = area._menu_space()
+    assert (round(left, 3), round(right, 3), round(bottom, 3)) == (0.0, 0.08, 0.051), (left, right, bottom)
+    x = area._target_x(left, right, bottom, others)
+    assert abs(x - (0.08 + SIDE_GAP)) < 1e-6, x
+    mm.submenus["PEN"].style["visible"] = True  # Freebird's pen options open on the right
+    x2 = area._target_x(*area._menu_space())
+    assert abs(x2 - (0.2 + SIDE_GAP)) < 1e-4, x2
+    mm.submenus["PEN"].style["visible"] = False
+    mm.submenus["SELECT"].style["visible"] = True  # select options open on the LEFT: no need to move
+    assert abs(area._target_x(*area._menu_space()) - x) < 1e-6
+    mm.submenus["SELECT"].style["visible"] = False
+    bl_xr.main_hand = "left"  # left-handed: mirrored, the area goes to the left of the menu
+    assert area._target_x(*area._menu_space()) < 0
+    bl_xr.main_hand = "right"
 
-    # between two swatches the laser lands on the panel background (still a UI hit: laser stays visible)
-    gap_pt = panel.grid.local_to_world_point(Vector((CELL - (CELL - SWATCH) / 2, SWATCH / 2, 0)))
-    node2, _, _ = raycast(gap_pt + Vector((0, 0, 0.5)), Vector((0, 0, -1)), object_raycast=False, ui_raycast=True)
-    assert node2 is panel.background, node2
+    def hit(tile, size):
+        c = tile.local_to_world_point(Vector((size / 2, size / 2, 0)))
+        node, _, _ = raycast(c + Vector((0, 0, 0.5)), Vector((0, 0, -1)), object_raycast=False, ui_raycast=True)
+        return node
 
-    # hover + press, dispatched the way bl_xr dispatches pointer events
-    sw.dispatch_event("pointer_main_enter", None)
-    assert panel.status.text == "Yellow" and "border" in sw.style
-    sw.dispatch_event("pointer_main_press_end", None)
+    yellow = color.tiles[18]
+    assert yellow.label == "Yellow" and hit(yellow, SWATCH) is yellow
+    metal = look.tiles[4]
+    assert metal.look == "Metallic" and hit(metal, TILE) is metal, hit(metal, TILE)
+
+    # Color, then Look, then Color: each keeps the other
+    yellow.dispatch_event("pointer_main_enter", None)
+    assert color.status.text == "Yellow" and "border" in yellow.style
+    yellow.dispatch_event("pointer_main_press_end", None)
+    yellow.dispatch_event("pointer_main_leave", None)
     mat = bpy.data.objects["Cube"].material_slots[0].material
-    assert mat.name == "VR Cube" and _base(mat) == _r3((*sw.linear, 1.0)), mat
-    assert _r3(bpy.data.objects["Cube"].color[:3]) == _r3(sw.linear)
-    assert panel.current is sw and panel.last_message == "1 object, 1 new", panel.last_message
-    sw.dispatch_event("pointer_main_leave", None)
-    assert panel.status.text == "1 object, 1 new" and sw.style["border"][1][2] == 1.0  # keeps the "current" ring
+    assert mat.name == "VR Cube" and _base(mat) == _r3((*yellow.linear, 1.0))
+    assert color.last_message == "1 object, 1 new", color.last_message
+    metal.dispatch_event("pointer_main_press_end", None)
+    assert materials.detect_look(mat) == "Metallic" and _base(mat) == _r3((*yellow.linear, 1.0))
+    area._refresh()
+    assert metal.current and yellow.current and not look.tiles[0].current
+    blue = color.tiles[21]
+    blue.dispatch_event("pointer_main_press_end", None)
+    assert materials.detect_look(mat) == "Metallic" and _base(mat) == _r3((*blue.linear, 1.0))
+    area._refresh()
+    assert blue.current and not yellow.current and metal.current
 
     # nothing selected -> friendly message, nothing created
     for ob in bpy.context.view_layer.objects:
         ob.select_set(False)
     n = len(bpy.data.materials)
-    panel.grid.child_nodes[0].dispatch_event("pointer_main_press_end", None)
-    assert panel.last_message == "Select an object first" and len(bpy.data.materials) == n
+    look.tiles[0].dispatch_event("pointer_main_press_end", None)
+    assert look.last_message == "Select an object first" and len(bpy.data.materials) == n
 
-    panel.detach()
-    assert panel.node.parent is None
+    # the plugin entry builds the same area with both sections
+    import vr_studio
+
+    vr_studio._on_xr_start(None, "fb.xr_start", None)
+    assert set(vr_studio._sections) == {"color", "look"} and vr_studio._area.node.parent is bl_xr.root
+    vr_studio._on_xr_end(None, "fb.xr_end", None)
+    assert vr_studio._area.node.parent is None
+    area.detach()
     print("=== VR STUDIO UI: PASS ===")
 
 
@@ -266,7 +400,21 @@ def run_host(mode):
           and _val("VR Ball", "Base Color") == _r3((*_lin("#1E88E5"), 1.0)), 30, s, "guest's blue")
     assert len([m for m in bpy.data.materials if m.name.startswith("VR ")]) == 1
     _write_state(h2=True)
-    _step(s, "g3", "guest done")
+
+    # 3. host: Toon on the Cube (node chain), Emission on the Ball -> guest sees both Looks, colour kept
+    blue = _r3((*_lin("#1E88E5"), 1.0))
+    materials.apply_look([cube], "Toon")
+    materials.apply_look([bpy.data.objects["Ball"]], "Emission")
+    _step(s, "g3", "guest saw Toon + Emission")
+    # 4. guest: Glass on the Cube, then a new colour -> host: Glass, toon nodes gone, green
+    green = _r3((*_lin("#43A047"), 1.0))
+    _wait(lambda: materials.detect_look(bpy.data.materials["Material"]) == "Glass"
+          and _val("Material", "Base Color") == green, 30, s, "guest's green glass")
+    assert not any(n.name.startswith("VR Toon") for n in bpy.data.materials["Material"].node_tree.nodes)
+    assert _val("Material", "Base Color") == green and materials.detect_look(bpy.data.materials["VR Ball"]) == "Emission"
+    assert _val("VR Ball", "Base Color") == blue
+    _write_state(h4=True)
+    _step(s, "g5", "guest done")
     print("=== VR STUDIO SYNC host: PASS ===")
 
 
@@ -292,7 +440,19 @@ def run_guest(mode):
         ob.select_set(ob == cube or ob.name == "Ball")
     materials.apply_color(materials.selected_targets(), _lin("#1E88E5"))
     _step(s, "h2", "host saw blue")
+
+    blue = _r3((*_lin("#1E88E5"), 1.0))
+    _wait(lambda: materials.detect_look(bpy.data.materials["Material"]) == "Toon"
+          and materials.detect_look(bpy.data.materials["VR Ball"]) == "Emission", 30, s, "host's Toon + Emission")
+    assert _val("Material", "Base Color") == blue and _val("VR Ball", "Base Color") == blue
+    assert _val("VR Ball", "Emission Color") == blue
+    out = next(n for n in bpy.data.materials["Material"].node_tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
+    assert out.inputs["Surface"].links[0].from_node.name == "VR Toon Emit"
     _write_state(g3=True)
+    materials.apply_look([cube], "Glass")
+    materials.apply_color([cube], _lin("#43A047"))
+    _step(s, "h4", "host saw green glass")
+    _write_state(g5=True)
     t = time.time()
     while time.time() - t < 1.0:
         s.tick()
