@@ -6,12 +6,14 @@ A Freebird XR plugin (folder plugin). Install by copying the whole `vr_studio` f
     ~/.freebird/plugins/vr_studio/      (C:\\Users\\<you>\\.freebird\\plugins\\vr_studio)
 and restarting Blender (Freebird loads plugins when it starts).
 
-Freebird menu -> Plugins (CUSTOM) -> "Color" / "Look" toggle their panels in the VR Studio
+Freebird menu -> Plugins (CUSTOM) -> "Color" / "Look" / "View" toggle their panels in the VR Studio
 area, right next to the main menu on the left hand (on the side Freebird's sub-menus open).
     COLOR  32 colours.   Select objects, point at a colour, pull the trigger: done.
     LOOK   8 materials (Clay / Matte / Glossy / Plastic / Metallic / Glass / Emission / Toon).
            Independent of Color: blue + Matte -> blue + Metallic keeps the blue, and a new
            colour keeps the Look.
+    VIEW   the headset's shading: Wireframe / Solid / Material Preview / Rendered.
+           Only this person's view (never synced to the collab room).
 Undo / Redo are Freebird's own (left joystick / controller buttons).
 
 Independent of the freebird_collab add-on: it only edits Blender materials, and the
@@ -20,7 +22,7 @@ collab material + node tree sync (when a room is open) carries the change to eve
 
 import os
 
-fb_info = {"name": "VR Studio", "version": (0, 2, 0)}
+fb_info = {"name": "VR Studio", "version": (0, 3, 0)}
 
 PLUGIN_ID = "vr_studio"
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
@@ -29,6 +31,7 @@ ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 SECTIONS = [
     ("color", "Color", "color.png", ("color_section", "ColorSection")),
     ("look", "Look", "look.png", ("look_section", "LookSection")),
+    ("view", "View", "view.png", ("view_section", "ViewSection")),
 ]
 
 _area = None

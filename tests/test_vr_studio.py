@@ -337,6 +337,32 @@ def run_ui():
     area._refresh()
     assert blue.current and not yellow.current and metal.current
 
+    # VIEW: the headset's shading (XR session settings), not the desktop viewport's
+    from vr_studio import view
+    from vr_studio.view_section import ViewSection
+
+    vs = area.add(ViewSection())
+    area.toggle(vs)
+    assert abs(vs.node.position.y - (color.height + look.height + 2 * 0.006)) < 1e-6  # stacked on top
+    xr_shading = bpy.context.window_manager.xr_session_settings.shading
+    desktop = [sp.shading.type for sc in bpy.data.screens for a in sc.areas if a.type == "VIEW_3D" for sp in a.spaces
+               if sp.type == "VIEW_3D"]
+    n_undo = len(bpy.data.materials)
+    for tile, mode in zip(vs.tiles, ("WIREFRAME", "SOLID", "MATERIAL", "RENDERED")):
+        assert hit(tile, TILE) is tile
+        tile.dispatch_event("pointer_main_press_end", None)
+        assert xr_shading.type == mode and view.get_vr_shading() == mode, (xr_shading.type, mode)
+        area._refresh()
+        assert [t.current for t in vs.tiles] == [t is tile for t in vs.tiles]
+    assert vs.last_message.startswith("Rendered ("), vs.last_message  # names the render engine
+    after = [sp.shading.type for sc in bpy.data.screens for a in sc.areas if a.type == "VIEW_3D" for sp in a.spaces
+             if sp.type == "VIEW_3D"]
+    assert after == desktop, "the desktop 3D Viewport must keep its own shading"
+    assert len(bpy.data.materials) == n_undo
+    xr_shading.type = "SOLID"
+    area._refresh()
+    assert vs.tiles[1].current and not vs.tiles[3].current  # follows changes made elsewhere too
+
     # nothing selected -> friendly message, nothing created
     for ob in bpy.context.view_layer.objects:
         ob.select_set(False)
@@ -348,7 +374,7 @@ def run_ui():
     import vr_studio
 
     vr_studio._on_xr_start(None, "fb.xr_start", None)
-    assert set(vr_studio._sections) == {"color", "look"} and vr_studio._area.node.parent is bl_xr.root
+    assert set(vr_studio._sections) == {"color", "look", "view"} and vr_studio._area.node.parent is bl_xr.root
     vr_studio._on_xr_end(None, "fb.xr_end", None)
     assert vr_studio._area.node.parent is None
     area.detach()
@@ -414,6 +440,21 @@ def run_host(mode):
     assert _val("Material", "Base Color") == green and materials.detect_look(bpy.data.materials["VR Ball"]) == "Emission"
     assert _val("VR Ball", "Base Color") == blue
     _write_state(h4=True)
+
+    # 5. VIEW is local: host switches its VR shading -> nothing is sent, guest keeps its own
+    from vr_studio import view
+
+    before = {k: v[0] for k, v in s.stats["tx_by_type"].items()}
+    for mode in ("WIREFRAME", "MATERIAL", "RENDERED"):
+        view.set_vr_shading(mode)
+        t = time.time()
+        while time.time() - t < 1.2:
+            bpy.context.view_layer.update()
+            s.tick()
+            time.sleep(0.02)
+    grew = {k for k, v in s.stats["tx_by_type"].items() if v[0] > before.get(k, 0)}
+    assert grew <= {"presence", "ping", "pong"}, f"VR shading must not be sent, but these went out: {grew}"
+    _write_state(host_shading=view.get_vr_shading())
     _step(s, "g5", "guest done")
     print("=== VR STUDIO SYNC host: PASS ===")
 
@@ -452,6 +493,18 @@ def run_guest(mode):
     materials.apply_look([cube], "Glass")
     materials.apply_color([cube], _lin("#43A047"))
     _step(s, "h4", "host saw green glass")
+
+    # 5. host switched its VR shading to RENDERED: ours stays what we chose
+    from vr_studio import view
+
+    view.set_vr_shading("MATERIAL")
+    _wait(lambda: _read_state().get("host_shading") == "RENDERED", 30, s, "host's shading changes")
+    t = time.time()
+    while time.time() - t < 1.5:
+        bpy.context.view_layer.update()
+        s.tick()
+        time.sleep(0.02)
+    assert view.get_vr_shading() == "MATERIAL", view.get_vr_shading()
     _write_state(g5=True)
     t = time.time()
     while time.time() - t < 1.0:

@@ -117,6 +117,60 @@ def launcher_look():
     big.resize((128, 128), Image.LANCZOS).save(os.path.join(OUT, "look.png"))
 
 
+def view_icon(mode):
+    """Viewport shading icons, drawn like Blender's own four shading buttons (a ball each)."""
+    n, inside, alpha = _sphere(0.62)
+    ndl = np.clip(np.sum(n * L, axis=-1), 0, 1)[..., None]
+    ndh = np.clip(np.sum(n * H, axis=-1), 0, 1)[..., None]
+    ndv = np.clip(n[..., 2], 0, 1)[..., None]
+    grey = np.array([0.82, 0.83, 0.86])[None, None, :]
+    if mode == "wireframe":
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        r, c, w = S * 0.31, S / 2, int(S * 0.022)
+        box = [c - r, c - r, c + r, c + r]
+        d.ellipse(box, outline=(235, 238, 245, 255), width=w)
+        for k in (0.35, 0.72):  # meridians
+            d.ellipse([c - r * k, c - r, c + r * k, c + r], outline=(235, 238, 245, 255), width=w)
+        for k in (-0.5, 0.0, 0.5):  # parallels
+            y = c + r * k
+            half = r * np.sqrt(1 - k * k)
+            d.ellipse([c - half, y - half * 0.28, c + half, y + half * 0.28], outline=(235, 238, 245, 255), width=w)
+        img.resize((128, 128), Image.LANCZOS).save(os.path.join(OUT, "view_wireframe.png"))
+        return
+    if mode == "solid":
+        rgb = grey * (0.35 + 0.65 * ndl) + 0.15 * ndh ** 20
+    elif mode == "material":
+        c = np.array([0.93, 0.55, 0.25])[None, None, :]
+        r = 2 * ndv * n - V
+        rgb = c * (0.2 + 0.8 * ndl) + 0.6 * ndh ** 120 + 0.25 * (0.04 + 0.96 * (1 - ndv) ** 5) * _env(r)
+    elif mode == "rendered":
+        c = np.array([0.93, 0.55, 0.25])[None, None, :]
+        r = 2 * ndv * n - V
+        rgb = c * (0.08 + 0.95 * ndl ** 1.3) + 0.9 * ndh ** 200 + 0.3 * (0.04 + 0.96 * (1 - ndv) ** 5) * _env(r)
+        # soft contact shadow under the ball
+        sh = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        ImageDraw.Draw(sh).ellipse([S * 0.22, S * 0.74, S * 0.78, S * 0.86], fill=(255, 255, 255, 60))
+        glow = sh.filter(ImageFilter.GaussianBlur(S * 0.03))
+        rgb = np.where(inside[..., None], rgb, 0)
+        _save(rgb, alpha, "view_rendered.png", glow)
+        return
+    rgb = np.where(inside[..., None], rgb, 0)
+    _save(rgb, alpha, f"view_{mode}.png")
+
+
+def launcher_view():
+    """Launcher icon for VIEW: an eye."""
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    t = np.linspace(-1, 1, 60)
+    top = [(S / 2 + x * S * 0.4, S / 2 - (1 - x * x) * S * 0.22) for x in t]
+    bottom = [(S / 2 + x * S * 0.4, S / 2 + (1 - x * x) * S * 0.22) for x in t[::-1]]
+    d.line(top + bottom + [top[0]], fill=(255, 255, 255, 255), width=int(S * 0.045), joint="curve")
+    d.ellipse([S * 0.38, S * 0.38, S * 0.62, S * 0.62], fill=(255, 255, 255, 255))
+    im.resize((128, 128), Image.LANCZOS).save(os.path.join(OUT, "view.png"))
+
+
 def launcher_color():
     im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
@@ -133,6 +187,9 @@ if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     launcher_color()
     launcher_look()
+    launcher_view()
+    for mode in ("wireframe", "solid", "material", "rendered"):
+        view_icon(mode)
     for name in ("Clay", "Matte", "Glossy", "Plastic", "Metallic", "Glass", "Emission", "Toon"):
         ball(name)
     print("icons ->", OUT)
