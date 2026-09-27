@@ -16,6 +16,7 @@ relay/cloudflared.exe
 # --- ビルド生成物・配布zip（配布はGitHub Releases等で） ---
 *.zip
 Claude outputs/
+dist/
 
 # --- Blender 一時ファイル ---
 *.blend1
