@@ -17,6 +17,7 @@ import bpy
 from mathutils import Matrix
 
 from . import hub as hubmod
+from . import history as histmod
 from .link import Link
 from . import object_data
 from .protocol import make
@@ -32,7 +33,10 @@ MAT_HZ = 5.0  # max material / material-slot checks per second
 POSE_HZ = 15.0  # max pose-bone checks/sends per second (per armature, changed bones only)
 SCENE_EDIT_TYPES = ("xform", "obj_add", "obj_data", "obj_del", "img", "img_need", "mat", "mat_ren", "mat_del", "obj_mats", "pose")
 IGNORE_PREFIXES = ("FB-",)  # Freebird's own tracking empties
-ADDON_VERSION = "0.11.1"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) / node tree (0.11+) sync need it on BOTH sides
+ADDON_VERSION = "0.12.0"  # exchanged in "ver" after join: material (0.7+) / pose (0.8+) / armature (0.9+) / skinning (0.10+) / node tree (0.11+) sync need it on BOTH sides
+RESTORE_INFO_SECONDS = 0.25  # how fresh the "how to bring it back" info of every object is (undo of a delete)
+HOOK_CHECK_SECONDS = 2.0  # Freebird enabled after joining: hook its Undo / Redo on the next check
+LOCAL_UNDO_MODES = ("EDIT", "SCULPT")  # these modes undo inside the edited mesh only: Blender's own undo is safe there
 VER_TIMEOUT = 8.0  # seconds after a peer joins before "peer runs an old add-on" is logged
 MAT_KEYS = {"c": "viewport color", "vm": "viewport metallic", "vr": "viewport roughness", "rm": "render method",
             "bc": "backface culling", "p": "bsdf", "tex": "base color texture", "tx": "textures", "gp": "gp style", "l": "unsynced links",
@@ -171,6 +175,11 @@ class CollabSession:
         self._last_data_t = 0.0
         self._last_sweep_t = 0.0
         self._handler = None
+        # per-user undo / redo while in a room (history.py)
+        self.history = histmod.LocalHistory()
+        self._restore_info = {}  # obj name -> what is needed to bring it back after a delete (refreshed in _sync_objects)
+        self._last_restore_t = 0.0
+        self._last_hook_t = 0.0
         self.stats = {"tx": 0, "rx": 0, "tx_bytes": 0, "tx_by_type": {}}
         self.on_change = None  # callback -> request UI redraw
         self.local_presence = None  # what we last sent (for HUD/tests)
@@ -254,6 +263,10 @@ class CollabSession:
         self._dirty_arm.clear()
         self._pending_pose.clear()
         self._logged.clear()
+        self.history.clear()
+        self._restore_info.clear()
+        histmod.uninstall_freebird_hook()
+        self._last_hook_t = 0.0
         self._scene_loaded_from_host = False
         self._pending_scene = None
         self._deferred = []
@@ -400,6 +413,11 @@ class CollabSession:
                     import traceback
 
                     self._log_once(f"pose sync error: {e}\n{traceback.format_exc()}")
+        self.history.tick(now)
+        if now - self._last_hook_t >= HOOK_CHECK_SECONDS:
+            self._last_hook_t = now
+            if not histmod.freebird_hook_installed():
+                histmod.install_freebird_hook(self._freebird_undo)
         self._check_peer_versions(now)
         if now - self._last_presence_t >= 1.0 / PRESENCE_HZ:
             self._last_presence_t = now
@@ -416,6 +434,8 @@ class CollabSession:
         if self._pending_scene is not None and t in SCENE_EDIT_TYPES:
             self._deferred.append(msg)
             return
+        if t in SCENE_EDIT_TYPES:
+            self._note_remote(t, msg)
         if t == "welcome":
             self.uid = msg["uid"]
             self.room = msg["room"]
@@ -500,6 +520,26 @@ class CollabSession:
         elif t == "pong":
             pass
 
+    def _note_remote(self, t, msg):
+        """Somebody else changed these objects / materials: our older undo steps on them no longer apply."""
+        h = self.history
+        if t == "xform":
+            for name in msg.get("objs") or ():
+                h.touched("ob", name)
+        elif t in ("obj_add", "obj_data", "obj_mats", "pose"):
+            h.touched("ob", msg.get("name"))
+        elif t == "obj_del":
+            for name in msg.get("names") or ():
+                h.touched("ob", name)
+        elif t == "mat":
+            h.touched("mat", (msg.get("mat") or {}).get("n"))
+        elif t == "mat_ren":
+            h.touched("mat", msg.get("old"))
+            h.touched("mat", msg.get("new"))
+        elif t == "mat_del":
+            for name in msg.get("names") or ():
+                h.touched("mat", name)
+
     # ------------------------------------------------------------------
     # scene snapshot (host -> guest, once per join)
     # ------------------------------------------------------------------
@@ -537,6 +577,7 @@ class CollabSession:
         _log(f"loading host scene ({len(data) // 1024} KB)")
         bpy.ops.wm.open_mainfile(filepath=tmp, load_ui=False)
         self._scene_loaded_from_host = True
+        self.history.clear()  # nothing before the host's scene can be undone
         self._snapshot_tracking()
         for img in bpy.data.images:  # everything packed in the host's file is already on the host:
             if img.packed_file is not None:  # editing a GLB material must not upload its textures back
@@ -566,6 +607,8 @@ class CollabSession:
     def _snapshot_tracking(self):
         self.tracked = {ob.name: _mat_to_list(_world_matrix(ob)) for ob in self._iter_objects()}
         self.known = set(self.tracked)
+        self._restore_info = {}
+        self._last_restore_t = 0.0
         self.data_digest = {}
         for ob in self._iter_objects():
             try:
@@ -583,7 +626,16 @@ class CollabSession:
         changed = {}
         current = set()
         new_objs = []
+        now = time.time()
+        refresh = now - self._last_restore_t >= RESTORE_INFO_SECONDS
+        if refresh:
+            self._last_restore_t = now
         for ob in self._iter_objects():
+            if refresh and ob.name in self.known:
+                try:
+                    self._restore_info[ob.name] = self._object_info(ob)
+                except Exception as e:
+                    self._log_once(f"restore info failed for {ob.name}: {e}")
             current.add(ob.name)
             try:
                 m = _mat_to_list(_world_matrix(ob))
@@ -594,6 +646,7 @@ class CollabSession:
                 new_objs.append((ob, m))
                 continue
             if _mat_differs(self.tracked.get(ob.name), m):
+                self.history.record("x", ob.name, self.tracked.get(ob.name), m, now)
                 self.tracked[ob.name] = m
                 changed[ob.name] = m
         # new objects (e.g. a GLB import creates many at once): parents first, one message each,
@@ -606,19 +659,19 @@ class CollabSession:
             except Exception as e:
                 self._log_once(f"obj_add failed for {ob.name}: {e}")
             self.tracked[ob.name] = m
+            try:
+                info = self._restore_info[ob.name] = self._object_info(ob)
+                self.history.record("o", ob.name, None, info, now)
+            except Exception as e:
+                self._log_once(f"restore info failed for {ob.name}: {e}")
         removed = self.known - current
         if removed:
             self._send(make("obj_del", names=sorted(removed)))
             for n in removed:
-                self.tracked.pop(n, None)
-                self.data_digest.pop(n, None)
-                self._next_data_t.pop(n, None)
-                self.slot_state.pop(n, None)
-                self.pose_state.pop(n, None)
-                self._pending_pose.pop(n, None)
-                self._bones_sent.pop(n, None)
-                self.skin_meta.pop(n, None)
-                self._pending_mods.pop(n, None)
+                info = self._restore_info.get(n)
+                if info is not None:  # the data it used is still in the file (orphan) until reload: Undo can bring it back
+                    self.history.record("o", n, info, None, now)
+                self._forget_object(n)
         self.known = current
         if changed:
             self._send(make("xform", objs=changed))
@@ -627,6 +680,19 @@ class CollabSession:
         if msg not in self._logged:
             self._logged.add(msg)
             _log(msg)
+
+    def _forget_object(self, n):
+        self.tracked.pop(n, None)
+        self.data_digest.pop(n, None)
+        self._next_data_t.pop(n, None)
+        self.slot_state.pop(n, None)
+        self.pose_state.pop(n, None)
+        self._pending_pose.pop(n, None)
+        self._pending_data.pop(n, None)
+        self._bones_sent.pop(n, None)
+        self.skin_meta.pop(n, None)
+        self._pending_mods.pop(n, None)
+        self._restore_info.pop(n, None)
 
     def _send_obj_add(self, ob, m):
         payload = None
@@ -815,6 +881,8 @@ class CollabSession:
                 continue  # not announced yet; obj_add will carry its materials
             slots = object_data.serialize_slots(ob)
             if slots is not None and slots != self.slot_state.get(ob.name):
+                if self.slot_state.get(ob.name) is not None:
+                    self.history.record("s", ob.name, self.slot_state[ob.name], slots, now)
                 self.slot_state[ob.name] = slots
                 self._send(make("obj_mats", name=ob.name, slots=slots))
                 _log(f"sent obj_mats {ob.name} {[n for n, _ in slots]}")
@@ -827,6 +895,8 @@ class CollabSession:
         if digest == self.mat_digest.get(mat.name) and not full:
             return False
         prev = None if full else self._mat_state.get(mat.name)
+        if prev is not None:  # a brand-new material (prev None) is not an undo step of its own; its slot assignment is
+            self.history.record("m", mat.name, prev, item, time.time())
         self.mat_digest[mat.name] = digest
         self._mat_state[mat.name] = item
         out = object_data.material_delta(prev, item) if prev else item
@@ -1009,6 +1079,7 @@ class CollabSession:
         self.pose_state[ob.name] = cur
         if not delta or prev is None:  # first sight of a rig = baseline only (the peer has the same rig from the snapshot)
             return False
+        self.history.record("p", ob.name, {b: prev[b] for b in delta if b in prev}, delta, time.time())
         self._send(make("pose", name=ob.name, bones=delta))
         names = sorted(delta)
         _log(f"sent pose {ob.name} ({len(names)} bone{'s' if len(names) != 1 else ''}: "
@@ -1323,6 +1394,192 @@ class CollabSession:
             self.skin_meta.pop(name, None)
             self._pending_mods.pop(name, None)
             self.known.discard(name)
+
+    # ------------------------------------------------------------------
+    # per-user undo / redo (history.py): revert only what WE sent, as new edits through the normal sync
+    # ------------------------------------------------------------------
+    def undo_local(self):
+        return self._step(True)
+
+    def redo_local(self):
+        return self._step(False)
+
+    def _freebird_undo(self, name):
+        """Freebird's Undo / Redo while in a room. None = not ours (Freebird / Blender undo runs as usual)."""
+        if not self.active or self.uid is None:
+            return None
+        try:
+            if bpy.context.mode.startswith(LOCAL_UNDO_MODES):
+                return None  # Edit / Sculpt Mode undo stays inside the edited mesh: the result syncs as obj_data
+        except Exception:
+            pass
+        return self.undo_local() if name == "ed.undo" else self.redo_local()
+
+    def _step(self, undo):
+        if not self.active or self.uid is None:
+            return False
+        what = "undo" if undo else "redo"
+        h = self.history
+        step = h.pop(undo)
+        if step is None:
+            h.last_msg = f"nothing to {what}"
+            _log(h.last_msg)
+            self._notify()
+            return False
+        applied, skipped = [], []
+        h.replaying += 1
+        try:
+            for it in sorted(step.items.values(), key=lambda it: self._revert_order(it, undo)):
+                if h.version(it.key) != it.ver:
+                    skipped.append(it)  # somebody else changed it after us: theirs stays
+                    continue
+                try:
+                    ok = self._revert_item(it, undo)
+                except Exception as e:
+                    import traceback
+
+                    _log(f"{what} {it.key} failed: {e}\n{traceback.format_exc()}")
+                    ok = False
+                (applied if ok else skipped).append(it)
+        finally:
+            h.replaying -= 1
+        h.push_back(step, undo, applied)
+        label = step.label() if applied else ""
+        if skipped:
+            names = ", ".join(sorted({it.key[1] for it in skipped}))
+            h.last_msg = f"{what}: {len(applied)} done, kept {names} (edited by someone else since)"
+        else:
+            h.last_msg = f"{what} {label}"
+        _log(h.last_msg)
+        self._notify()
+        return bool(applied)
+
+    def _revert_order(self, it, undo):
+        """Objects that come back first (parents before children), objects that go away last."""
+        kind, name = it.key
+        target = it.before if undo else it.after
+        if kind == "o":
+            if target is not None:
+                d, parent = 0, target.get("parent")
+                while parent and d < 64:
+                    d += 1
+                    parent = (self._restore_info.get(parent) or {}).get("parent")
+                return (0, d, name)
+            return (3, 0, name)
+        return (1 if kind == "x" else 2, 0, name)
+
+    def _revert_item(self, it, undo):
+        kind, name = it.key
+        target, expect = (it.before, it.after) if undo else (it.after, it.before)
+        if kind == "o":
+            if target is None:  # it should not exist: delete it (keeping how to bring it back for the opposite step)
+                ob = bpy.data.objects.get(name)
+                if ob is None or name not in self.known:
+                    return False
+                info = self._object_info(ob)
+                bpy.data.objects.remove(ob, do_unlink=True)
+                self._forget_object(name)
+                self.known.discard(name)
+                self._send(make("obj_del", names=[name]))
+                if undo:
+                    it.after = info
+                else:
+                    it.before = info
+                return True
+            if name in bpy.data.objects:
+                return False  # the name is taken again
+            ob = self._restore_object(name, target)
+            if ob is None:
+                return False
+            m = _mat_to_list(_world_matrix(ob))
+            self._send_obj_add(ob, m)
+            self.tracked[name] = m
+            self.known.add(name)
+            self._restore_info[name] = target
+            return True
+        ob = bpy.data.objects.get(name) if kind != "m" else None
+        if kind == "x":
+            if ob is None or name not in self.known or _mat_differs(self.tracked.get(name), expect):
+                return False
+            _set_world_matrix(ob, _list_to_mat(target))
+            self.tracked[name] = target
+            self._send(make("xform", objs={name: target}))
+            return True
+        if kind == "s":
+            if ob is None or self.slot_state.get(name) != expect:
+                return False
+            object_data.apply_slots(ob, target)
+            slots = object_data.serialize_slots(ob)
+            self.slot_state[name] = slots
+            self._send(make("obj_mats", name=name, slots=slots))
+            for slot in ob.material_slots:
+                if slot.material is not None and object_data.material_uid(slot.material) not in self.mat_names:
+                    self._remember_material(slot.material)
+            return True
+        if kind == "p":
+            state = self.pose_state.get(name) or {}
+            if ob is None or ob.type != "ARMATURE" or any(state.get(b) != st for b, st in (expect or {}).items()):
+                return False
+            object_data.apply_pose(ob, target or {})
+            self._send_pose_if_changed(ob)
+            return True
+        if kind == "m":
+            mat = bpy.data.materials.get(name)
+            cur = self._mat_state.get(name)
+            if mat is None or mat.library or cur is None or object_data.state_digest(cur) != object_data.state_digest(expect):
+                return False
+            object_data.apply_material(target)
+            self._send_material_if_changed(mat)
+            return True
+        return False
+
+    _DATA_COLLECTIONS = {"MESH": "meshes", "CURVE": "curves", "SURFACE": "curves", "FONT": "curves", "LIGHT": "lights",
+                         "CAMERA": "cameras", "ARMATURE": "armatures", "GREASEPENCIL": "grease_pencils",
+                         "META": "metaballs", "LATTICE": "lattices", "SPEAKER": "speakers", "LIGHT_PROBE": "lightprobes",
+                         "POINTCLOUD": "pointclouds", "CURVES": "hair_curves", "VOLUME": "volumes"}
+
+    def _object_info(self, ob):
+        """What undoing a delete needs: the datablock (it stays in the file as an orphan until reload), placement,
+        collections, object-linked material slots and Armature modifiers. Vertex group names live on the mesh."""
+        info = {"type": ob.type, "m": _mat_to_list(_world_matrix(ob)), "parent": ob.parent.name if ob.parent else None,
+                "data": ob.data.name if ob.data is not None else None,
+                "colls": [c.name for c in ob.users_collection]}
+        if ob.type == "EMPTY":
+            info["empty"] = [ob.empty_display_type, ob.empty_display_size]
+        slots = object_data.serialize_slots(ob)
+        if slots and any(link == "OBJECT" for _n, link in slots):
+            info["slots"] = slots
+        meta = object_data.skin_meta(ob)
+        if meta and meta.get("mods"):
+            info["mods"] = meta["mods"]
+        return info
+
+    def _restore_object(self, name, info):
+        data = None
+        if info.get("data") is not None:
+            coll = getattr(bpy.data, self._DATA_COLLECTIONS.get(info["type"], ""), None)
+            data = coll.get(info["data"]) if coll is not None else None
+            if data is None:
+                _log(f"cannot bring back {name}: its {info['type'].lower()} data {info['data']} is gone (file reloaded?)")
+                return None
+        ob = bpy.data.objects.new(name, data)
+        if ob.name != name:
+            ob.name = name
+        if info.get("empty"):
+            ob.empty_display_type, ob.empty_display_size = info["empty"]
+        scene = bpy.context.scene
+        colls = [c for c in (bpy.data.collections.get(n) for n in info.get("colls") or ()) if c is not None]
+        for c in colls or [scene.collection]:
+            c.objects.link(ob)
+        parent = info.get("parent")
+        if parent and parent in bpy.data.objects:
+            ob.parent = bpy.data.objects[parent]
+        ob.matrix_world = _list_to_mat(info["m"])
+        if info.get("slots"):
+            object_data.apply_slots(ob, info["slots"])
+        if info.get("mods"):
+            object_data.apply_armature_modifiers(ob, info["mods"])
+        return ob
 
     # ------------------------------------------------------------------
     # presence (head / hands / ray / selection / tool)
