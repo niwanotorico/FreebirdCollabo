@@ -38,7 +38,7 @@ def main():
     assert p.mode == "RELAY", p.mode
     from freebird_collab import session as sessmod
 
-    assert fc.bl_info["version"] == (0, 11, 1), fc.bl_info["version"]
+    assert fc.bl_info["version"] == (0, 12, 0), fc.bl_info["version"]
     assert sessmod.ADDON_VERSION == ".".join(map(str, fc.bl_info["version"])), sessmod.ADDON_VERSION
     print("PASS 1 defaults:", p.mode, p.relay_url, "v" + sessmod.ADDON_VERSION)
 
