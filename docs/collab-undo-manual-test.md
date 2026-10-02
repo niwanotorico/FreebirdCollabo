@@ -1,0 +1,52 @@
+# 実機確認の手順：自分専用 Undo / Redo（v0.12.0、ブランチ `collab-undo`）
+
+ルーム中の Undo / Redo が「自分の操作だけ」を戻し、相手の作業に触らないことを確かめる。
+ヘッドレスのテスト（`tests/test_undo.py` direct / relay）は通っている。ここでは VR と Freebird 本体、キー操作を見る。
+
+## 準備
+
+1. 3090（A）と 5080（B）の両方で `collab-undo` を取り込む（5080 は `_worktrees/collab-undo`）
+2. `freebird_collab/` フォルダーから zip を作って、両方の Blender に入れ直す
+   - リポジトリ直下の `freebird_collab_addon.zip` はまだ 0.11.1。使わない
+   - 作った zip はコミットしない
+3. Blender を再起動して、COLLAB パネルのバージョンが **0.12.0** になっていることを両方で確かめる
+4. A がルームを作り、B が入る（Direct でも Relay でもよい。時間があれば両方）
+5. A・B ともシステムコンソールを開いておく（`[collab] undo ...` のログを見る）
+
+COLLAB パネルに「Undo mine (n)」「Redo (n)」と、直近のメッセージが出ていれば準備 OK。
+
+## 確認項目
+
+| # | 操作 | 期待する結果 | 結果 |
+|---|---|---|---|
+| 1 | A が Cube を動かす → 1 秒待つ → B が別の Sphere を動かす → A が Undo（左スティック左） | Cube だけ元の位置に戻る。Sphere は A・B 両方の画面で動いたまま | |
+| 2 | 続けて A が Redo（左スティック右） | Cube がもう一度動く（両方の画面） | |
+| 3 | A が Cube を動かす → 1 秒待つ → B が同じ Cube を動かす → A が Undo | Cube は B が置いた位置のまま。A のログに `edited by someone else` | |
+| 4a | A がシェイプを描く（新しいオブジェクト）→ Undo | 両方の画面から消える | |
+| 4b | 続けて A が Redo | 両方の画面に戻る | |
+| 4c | A が消しゴムでそのオブジェクトを消す → Undo | 形・マテリアルごと両方の画面に戻る | |
+| 5 | A が VR Studio の Color / Look を押す → Undo | 両方とも元の色に戻る | |
+| 6 | A が Pose Mode でボーンを回す → Undo | 両方とも元のポーズに戻る | |
+| 7 | B 側でも 1 と同じことをする（B が自分の操作を Undo） | B の操作だけ戻る。A の作業はそのまま | |
+| 8 | デスクトップで Ctrl+Z / Ctrl+Shift+Z（Object Mode） | 1・2 と同じ動き。ログに `[collab] undo ...` が出る。**Blender のファイル全体の Undo が走らないこと** | |
+| 9 | Edit Mode でメッシュを編集 → Ctrl+Z | 今まで通り、その編集だけが戻る（Blender の Undo）。相手の作業は消えない | |
+| 10 | ルームを抜ける → Ctrl+Z | 通常の Blender の Undo に戻る（エラーが出ない）。Freebird の Undo も普段通り動く | |
+
+## 特に見てほしいところ
+
+- **8 のキー割り当て**：アドオンのキーマップ（Screen、Ctrl+Z / Ctrl+Shift+Z）が Blender 標準の Undo より先に呼ばれるかどうかは、ヘッドレスでは確かめられなかった。もしファイル全体が戻る（相手の作業も消える）なら、すぐ止めて結果を教えてほしい
+- **Freebird のフック**：ルームに入って 2 秒ほどで、コンソールに `Freebird Undo / Redo now undo only your own changes while in the room` が出るはず。出ないなら 1 も Blender の Undo になってしまうので、その時点で止めて教えてほしい
+- **ステップの区切り**：操作のあと 0.8 秒止まると 1 ステップとして閉じる。続けて操作する確認では、間に 1 秒ほど待つ
+
+## 失敗したときに送ってほしいもの
+
+1. 何番の項目で、A / B のどちらが何をしたか
+2. 両方のシステムコンソールのログ（`[collab]` の行）
+3. COLLAB パネルの Undo / Redo の数と、メッセージ
+
+## わかっている制限（今回は確認しなくてよい）
+
+- Edit Mode のメッシュ編集・ボーン構造・ウェイトは自分専用 Undo の対象外（Blender の Undo のまま）
+- 新しく作ったマテリアルそのものは Undo できない（スロットへの割り当ては Undo できる）
+- メニューの Edit > Undo は Blender の Undo（ファイル全体）が走る
+- 詳細は `docs/collab-undo-handoff.md` の「わかっている制限」
