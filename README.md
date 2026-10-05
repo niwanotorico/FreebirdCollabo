@@ -4,7 +4,7 @@
 
 [日本語版 README](README_JA.md)
 
-> ⚠️ **Public Alpha (v0.11.1)** — FreebirdCollabo is still in early development. Please back up any important `.blend` files before using it.
+> ⚠️ **Public Alpha (v0.12.0)** — FreebirdCollabo is still in early development. Please back up any important `.blend` files before using it.
 
 FreebirdCollabo is a Blender add-on that keeps a single Blender scene in sync across multiple Blender instances in real time.
 
@@ -33,7 +33,7 @@ Once the host's scene loads on your side, you're connected. From then on, everyo
 - You can see other people's **selected objects** and **active tool** in the desktop 3D Viewport. With Freebird XR, their **head (HMD), both hands, and pointer rays** are also drawn — in both the VR view and on the desktop.
 - The UI is just **Create Room / Join Room / Leave Room** in the `COLLAB` panel (N panel). With Freebird XR, you can also use them from the VR menu.
 
-## What gets synced (v0.11.1)
+## What gets synced (v0.12.0)
 
 Everything below has been verified on real machines with Blender 5.2.
 
@@ -50,6 +50,7 @@ Everything below has been verified on real machines with Blender 5.2.
 | Armature / Bone | Creating an Armature while connected, adding / deleting / renaming Bones, head / tail / roll, parent / connected (live, even in Edit Mode) |
 | Skinning | Create / delete / rename Vertex Groups, per-vertex weights (live during Weight Paint, including Automatic Weights results), the Armature Modifier with its target and main settings. Meshes deform to match the pose on the other side, too |
 | Import | GLB import while connected (with hierarchy, multiple meshes, UVs, materials, and textures) |
+| Undo / Redo | In a room, Undo / Redo (Ctrl+Z / Ctrl+Shift+Z, and Freebird's Undo / Redo) revert **only your own changes** and never touch other people's work. The result reaches everyone through the normal sync. Covers: moves, adding / deleting objects, materials, material slots, and Pose. Quick successive Create / Duplicate actions are undone one at a time (a multi-select Duplicate or a GLB import is undone in one go). Anything someone else changed after you is left as they made it |
 | Presence | Selection, Active Tool (Freebird tools such as `fb:draw.stroke` when available, otherwise Blender tools), and — with Freebird XR — HMD, left / right controllers (20 Hz), and pointer rays |
 
 For how simultaneous edits to the same thing are handled (e.g. changes are held while someone is in Edit Mode or Weight Paint, and whoever exits last wins) and for per-feature details, see the documents in [`docs/`](docs/).
@@ -57,7 +58,9 @@ For how simultaneous edits to the same thing are handled (e.g. changes are held 
 ## Known limitations
 
 - Moving objects between Collections is not supported yet.
-- Undo is not shared — your Undo only affects your own Blender.
+- Not covered by the per-user Undo / Redo: mesh edits, bone structure, and weights made in Edit Mode (Edit / Sculpt Mode keep Blender's own Undo), and newly created materials themselves (their slot assignment can be undone).
+- **Edit > Undo** in the menu runs Blender's own (whole-file) Undo. In a room, use Ctrl+Z / Ctrl+Shift+Z or Freebird's Undo / Redo.
+- Undoing after you leave a room may take you back to a state from while you were in it.
 - No permission management: anyone who knows the Room Code can join and edit.
 - No built-in voice chat (use Discord or similar).
 - Newer sync features, such as Material Node Tree, are still alpha quality.
@@ -86,7 +89,8 @@ Do the same on every participant's PC.
 - **Using your own relay:** Replace the Relay URL with your own relay's URL (`wss://...`, or on a LAN, `ws://192.168.x.x:7788` pointing to the PC running `python3 relay/collab_relay.py`). **All participants must use the same Relay URL.** See [`docs/internet-relay.md`](docs/internet-relay.md) for how to set up a relay. Click the ↺ button next to the field (or clear the field) to switch back to the default relay.
 - **Direct (IP address):** Set **Connection** to **Direct** to skip the relay; the host listens on port 7788. Guests enter the host's IP address (LAN, or a VPN such as Tailscale) in the `Host IP` field instead of the Code field. Intended for LAN use and debugging.
 - **Upgrading from v0.11.0 or earlier:** If you had entered a Relay URL manually, that value is kept after the update. Click ↺ if you want to switch to the default relay.
-- **Mixing versions:** Add-on versions v0.11.0 and earlier have no default Relay URL. If someone is still on an older version, ask them to update to v0.11.1. (The synced content is the same as in v0.11.0, so mixed versions still work — but older versions require entering the Relay URL manually.)
+- **Mixing v0.12.0 and v0.11.x:** The message format is unchanged, so they can connect. However, Undo on v0.11.x or earlier is Blender's whole-file Undo and rewinds other people's work too. **We recommend that everyone updates to v0.12.0.**
+- **Mixing versions:** Add-on versions v0.11.0 and earlier have no default Relay URL. If someone is still on an older version, ask them to update to the latest version (v0.12.0). (Mixed versions still connect, but older versions require entering the Relay URL manually.)
 
 ## Usage
 
@@ -109,14 +113,15 @@ Voice chat is not built in — use Discord or similar.
 FreebirdCollabo/
 ├─ freebird_collab/          The Blender add-on (place the whole folder in scripts/addons)
 │   ├─ __init__.py           UI, operators, timers, public API
-│   ├─ session.py            Sync logic (master scene sharing / Transform / object data / materials / Pose / Presence)
+│   ├─ session.py            Sync logic (master scene sharing / Transform / object data / materials / Pose / Presence / running per-user Undo)
+│   ├─ history.py            Per-user Undo / Redo history (records only your own changes, step grouping, conflict checks) and the Freebird Undo hook
 │   ├─ object_data.py        Serializes and applies in place the contents of Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty/Armature, materials, and Node Trees
 │   ├─ presence.py           GPU drawing of others' head, hands, rays, selection outlines, and labels
 │   ├─ hub.py                Room hub (the relay server, and the host's built-in server in Direct mode)
 │   ├─ link.py               TCP client (receive thread → queue to the main thread)
 │   ├─ protocol.py           Message definitions (4-byte length + JSON)
 │   └─ ws.py                 WebSocket implementation (stdlib only) — so the relay can run on free HTTP hosting
-├─ freebird_collab_addon.zip  Distribution zip of the add-on (v0.11.1; install via Preferences > Add-ons > Install from Disk)
+├─ freebird_collab_addon.zip  Distribution zip of the add-on (v0.12.0; install via Preferences > Add-ons > Install from Disk)
 ├─ freebird_plugin/
 │   └─ freebird_collab_menu.py   Plugin that adds COLLAB buttons to the Freebird VR menu (Freebird XR only)
 ├─ relay/collab_relay.py     Relay server (no dependencies; auto-detects TCP and WebSocket on the same port)
@@ -133,6 +138,7 @@ FreebirdCollabo/
 ├─ tests/test_skinning.py    Vertex Group / Skinning sync test (Automatic Weights, Weight Paint, add/rename/delete groups, Armature Modifier, matching mesh deformation on the other side, held changes during Weight Paint, reconnect)
 ├─ tests/test_glb.py         GLB import sync test during a session (bidirectional, hierarchy, multiple meshes, editing after import)
 ├─ tests/test_relay_default.py Relay URL default test (room-code-only join, custom URL, empty-field fallback, Reset, Direct unaffected)
+├─ tests/test_undo.py        Per-user Undo / Redo test (others' work untouched, Redo, conflicts, add / delete, materials, Pose, quick successive creates, bpy-free unit test of step grouping)
 ├─ tests/test_glb_real.py    Import sync test with real GLB files (set paths via COLLAB_GLBS)
 ├─ docs/research.md          Research notes, architecture, risks
 ├─ docs/internet-relay.md    For people who want to host their own relay (Cloudflare Workers / quick tunnel / Python relay; most users can skip this)
@@ -144,7 +150,9 @@ FreebirdCollabo/
 ├─ docs/pose-sync-v0.8.md    Pose Mode bone transform sync (scope, loop prevention, reconnect, real-machine test steps)
 ├─ docs/armature-sync-v0.9.md Armature / Bone structure sync (scope, Edit Mode conflict handling, ordering with Pose, real-machine test steps)
 ├─ docs/skinning-sync-v0.10.md Vertex Group / Skinning sync (scope, handling during Weight Paint, Armature Modifier reference resolution, real-machine test steps)
-└─ docs/material-node-sync-v0.11.md Shader Node Tree sync (payload, diffs, Image Texture references, unsupported nodes, backward compatibility, real-machine test steps)
+├─ docs/material-node-sync-v0.11.md Shader Node Tree sync (payload, diffs, Image Texture references, unsupported nodes, backward compatibility, real-machine test steps)
+├─ docs/collab-undo-handoff.md Per-user Undo / Redo (v0.12.0): how it works, known limitations (Japanese)
+└─ docs/collab-undo-manual-test.md Real-machine test steps for per-user Undo / Redo (Japanese)
 ```
 
 ## Tests
@@ -166,6 +174,7 @@ python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
 python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, custom URL, Reset, Direct unchanged; "live" = also Check Relay)
+python3 tests/test_undo.py direct   # per-user Undo / Redo (same modes as above; "unit" = undo step grouping only, no bpy)
 ```
 
 `tests/test_sync.py` launches a host and a guest process (plus a relay) and automatically verifies the full flow: Create → Join → sharing the master scene → two-way sync of moving a Cube → new objects → selection / tool presence → saving on the host. All of these pass.
