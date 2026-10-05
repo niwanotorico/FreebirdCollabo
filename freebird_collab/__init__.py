@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Freebird Collaboration Layer",
     "author": "chikin + Claude",
-    "version": (0, 11, 1),
+    "version": (0, 12, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > COLLAB  (and Freebird XR menu via plugin)",
     "description": "Remote co-editing: shared room, host-authoritative scene, live head/hand/pointer/selection/tool presence",
@@ -15,8 +15,9 @@ import random
 import bpy
 from bpy.props import EnumProperty, FloatVectorProperty, IntProperty, StringProperty
 
+from . import history
 from . import presence
-from .session import CollabSession
+from .session import LOCAL_UNDO_MODES, CollabSession
 
 TICK_INTERVAL = 1.0 / 60.0
 
@@ -222,6 +223,38 @@ class COLLAB_OT_reset_relay_url(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class _RoomUndoBase:
+    """Ctrl+Z / Ctrl+Shift+Z while in a room: undo / redo only your own changes (Blender's undo would rewind
+    everybody's). Outside a room, and in Edit / Sculpt Mode (undo local to the mesh), poll fails and the key
+    falls through to Blender's normal undo."""
+
+    @classmethod
+    def poll(cls, context):
+        return _session.active and _session.uid is not None and not context.mode.startswith(LOCAL_UNDO_MODES)
+
+
+class COLLAB_OT_undo(_RoomUndoBase, bpy.types.Operator):
+    bl_idname = "collab.undo"
+    bl_label = "Undo (mine)"
+    bl_description = "Undo your last change in the room. Other people's work is never touched"
+
+    def execute(self, context):
+        if not _session.undo_local():
+            self.report({"INFO"}, _session.history.last_msg or "nothing to undo")
+        return {"FINISHED"}
+
+
+class COLLAB_OT_redo(_RoomUndoBase, bpy.types.Operator):
+    bl_idname = "collab.redo"
+    bl_label = "Redo (mine)"
+    bl_description = "Redo your last undone change in the room"
+
+    def execute(self, context):
+        if not _session.redo_local():
+            self.report({"INFO"}, _session.history.last_msg or "nothing to redo")
+        return {"FINISHED"}
+
+
 class COLLAB_OT_copy_code(bpy.types.Operator):
     bl_idname = "collab.copy_code"
     bl_label = "Copy Room Code"
@@ -276,6 +309,12 @@ class COLLAB_PT_panel(bpy.types.Panel):
                 box.label(text=f"    {tool}   sel: {sel}")
         if not s.peers:
             box.label(text="waiting for the other user...")
+        n_undo, n_redo = s.history.counts()
+        row = layout.row(align=True)
+        row.operator("collab.undo", text=f"Undo mine ({n_undo})", icon="LOOP_BACK")
+        row.operator("collab.redo", text=f"Redo ({n_redo})", icon="LOOP_FORWARDS")
+        if s.history.last_msg:
+            layout.label(text=s.history.last_msg[:60])
         layout.operator("collab.save_master", icon="FILE_TICK")
         layout.operator("collab.leave_room", icon="X")
         layout.label(text=f"tx {s.stats['tx']}  rx {s.stats['rx']}")
@@ -311,15 +350,40 @@ classes = (
     COLLAB_OT_leave_room,
     COLLAB_OT_save_master,
     COLLAB_OT_copy_code,
+    COLLAB_OT_undo,
+    COLLAB_OT_redo,
     COLLAB_OT_check_relay,
     COLLAB_OT_reset_relay_url,
     COLLAB_PT_panel,
 )
 
 
+_keymaps = []
+
+
+def _register_keymaps():
+    kc = bpy.context.window_manager.keyconfigs.addon
+    if kc is None:  # background mode
+        return
+    km = kc.keymaps.new(name="Screen", space_type="EMPTY")
+    for idname, shift in (("collab.undo", False), ("collab.redo", True)):
+        kmi = km.keymap_items.new(idname, "Z", "PRESS", ctrl=True, shift=shift)
+        _keymaps.append((km, kmi))
+
+
+def _unregister_keymaps():
+    for km, kmi in _keymaps:
+        try:
+            km.keymap_items.remove(kmi)
+        except Exception:
+            pass
+    _keymaps.clear()
+
+
 def register():
     for c in classes:
         bpy.utils.register_class(c)
+    _register_keymaps()
     bpy.types.WindowManager.collab_join_target = StringProperty(name="Room", default="")
     _session.on_change = _redraw
     presence.register(get_session)
@@ -329,6 +393,8 @@ def register():
 
 def unregister():
     _session.leave()
+    history.uninstall_freebird_hook()
+    _unregister_keymaps()
     if bpy.app.timers.is_registered(_timer):
         bpy.app.timers.unregister(_timer)
     presence.unregister()

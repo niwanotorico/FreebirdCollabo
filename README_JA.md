@@ -4,7 +4,7 @@
 
 [English README](README.md)
 
-> ⚠️ **Public Alpha（v0.11.1）** — まだ開発初期の公開α版です。重要な `.blend` ファイルは必ずバックアップを取ってから使ってください。
+> ⚠️ **Public Alpha（v0.12.0）** — まだ開発初期の公開α版です。重要な `.blend` ファイルは必ずバックアップを取ってから使ってください。
 
 FreebirdCollabo は、1 つの Blender シーンを複数の Blender 間でリアルタイムに同期する Blender アドオンです。
 
@@ -33,7 +33,7 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 - 相手の **選択オブジェクト / 使用中ツール** をデスクトップ 3D ビューに表示。Freebird XR 使用時は **頭（HMD）/ 左右の手 / ポインターのレイ** も VR ビューとデスクトップの両方に描画
 - UI は `COLLAB` パネル（N パネル）の **Create Room / Join Room / Leave Room** だけ。Freebird XR 使用時は VR メニューからも操作できる
 
-## 同期している機能（v0.11.1）
+## 同期している機能（v0.12.0）
 
 すべて Blender 5.2 の実機で同期を確認済みです。
 
@@ -50,6 +50,7 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 | Armature / Bone | 接続中の Armature 新規作成、Bone の追加 / 削除 / Rename、head / tail / roll、parent / connected（Edit Mode 中もリアルタイム） |
 | Skinning | Vertex Groups の作成 / 削除 / Rename、各頂点の Weight（Weight Paint 中もリアルタイム、Automatic Weights の結果も）、Armature Modifier とその参照・主要設定。相手側でも Pose に合わせてメッシュが変形する |
 | Import | 接続中の GLB Import（階層・複数 Mesh・UV・マテリアル・テクスチャ付き） |
+| Undo / Redo | ルーム中の Undo / Redo（Ctrl+Z / Ctrl+Shift+Z、Freebird の Undo / Redo）は**自分の操作だけ**を戻し、相手の作業には触らない。戻した結果は普段の同期で全員に反映される。対象：移動、オブジェクトの追加 / 削除、マテリアル、マテリアルスロット、Pose。素早く続けた Create / Duplicate も 1 回ずつ戻せる（複数選択の Duplicate や GLB 読み込みは 1 回でまとめて戻る）。自分が操作した後に相手が触った物は戻さない |
 | Presence | 選択、Active Tool（Freebird があれば `fb:draw.stroke` 等 / なければ Blender のツール）、Freebird XR 使用時の HMD / 左右コントローラー（20Hz）/ ポインターのレイ |
 
 同じ対象を 2 人が同時に編集した場合の扱い（Edit Mode / Weight Paint 中の保留、後に抜けた側が勝つ など）や各機能の詳細は [`docs/`](docs/) の各ドキュメントを参照。
@@ -57,7 +58,9 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 ## 既知の制限
 
 - Collection 間の移動は未対応
-- Undo は共有されない（各自の Undo は自分の Blender だけに効く）
+- 自分専用 Undo / Redo の対象外：Edit Mode のメッシュ編集・ボーン構造・ウェイト（Edit / Sculpt Mode では Blender の Undo のまま）、新しく作ったマテリアルそのもの（スロットへの割り当ては戻せる）
+- メニューの Edit > Undo は Blender の Undo（ファイル全体）になる。ルーム中は Ctrl+Z / Ctrl+Shift+Z か Freebird の Undo / Redo を使う
+- ルームを抜けたあとに Undo すると、ルーム中の状態まで戻ることがある
 - 権限管理なし（ルームコードを知っている人は誰でも参加・編集できる）
 - 音声は内蔵していない（Discord などを併用）
 - Material Node Tree など新しい同期機能はまだ alpha 品質
@@ -84,7 +87,8 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 - **自分の Relay を使う**：Relay URL 欄を自分の Relay の URL に書き換える（`wss://...` / LAN なら `python3 relay/collab_relay.py` を動かした PC の `ws://192.168.x.x:7788`）。**参加者全員が同じ Relay URL にする必要がある**。Relay の立て方は補足資料 [`docs/internet-relay.md`](docs/internet-relay.md) を参照。欄の右の ↺ ボタン（または欄を空にする）で既定の Relay に戻る
 - **Direct (IP address)**：Connection を Direct にすると Relay を使わず、ホストがポート 7788 で待ち受ける。ゲストは Code 欄の代わりに `Host IP` 欄へ IP（LAN や Tailscale 等の VPN）を入力。LAN / デバッグ用
 - **v0.11.0 以前からのアップデート**：Relay URL を自分で入力していた場合は、アップデート後もその値がそのまま使われる。既定の Relay にそろえたいときは ↺ ボタンを押す
-- **古い版との混在**：v0.11.0 以前のアドオンには Relay URL の既定値が無い。相手が古い版のままなら、相手のアドオンも v0.11.1 に更新してもらう（同期の中身は v0.11.0 と同じなので混在しても動くが、古い版では Relay URL の手入力が必要）
+- **v0.12.0 と v0.11.x の混在**：通信の形式は変えていないので接続はできる。ただし v0.11.x 以前の人が Undo すると Blender の Undo（ファイル全体）になり、ほかの人の作業も巻き戻ってしまう。**全員 v0.12.0 にそろえるのがおすすめ**
+- **古い版との混在**：v0.11.0 以前のアドオンには Relay URL の既定値が無い。相手が古い版のままなら、相手のアドオンも最新版（v0.12.0）に更新してもらう（混在しても接続はできるが、古い版では Relay URL の手入力が必要）
 
 ## 使い方
 
@@ -107,14 +111,15 @@ Relay URL は設定済みなので、**やることは「ホストが Create Roo
 FreebirdCollabo/
 ├─ freebird_collab/          Blender アドオン本体（scripts/addons にフォルダごと置く）
 │   ├─ __init__.py           UI・オペレーター・タイマー・公開API
-│   ├─ session.py            同期ロジック（正本共有 / Transform / オブジェクトデータ / マテリアル / Pose / Presence）
+│   ├─ session.py            同期ロジック（正本共有 / Transform / オブジェクトデータ / マテリアル / Pose / Presence / 自分専用 Undo の実行）
+│   ├─ history.py            自分専用 Undo / Redo の履歴（自分が送った変更だけを記録・ステップの区切り・競合判定）と Freebird の Undo フック
 │   ├─ object_data.py        Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty/Armature・マテリアル・Node Tree の内容をシリアライズ・in-place 適用
 │   ├─ presence.py           相手の頭・手・レイ・選択枠・ラベルの GPU 描画
 │   ├─ hub.py                ROOM ハブ（relay サーバー兼 direct モードのホスト内蔵サーバー）
 │   ├─ link.py               TCP クライアント（受信スレッド → メインスレッドへキュー）
 │   ├─ protocol.py           メッセージ定義（4byte 長 + JSON）
 │   └─ ws.py                 WebSocket 実装（stdlib のみ）— 無料 HTTP ホスティングに Relay を置くため
-├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.11.1。Preferences > Add-ons > Install from Disk でも入れられる）
+├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.12.0。Preferences > Add-ons > Install from Disk でも入れられる）
 ├─ freebird_plugin/
 │   └─ freebird_collab_menu.py   Freebird VR メニューに COLLAB ボタンを足すプラグイン（Freebird XR 使用時のみ）
 ├─ relay/collab_relay.py     中継サーバー（依存なし・TCP と WebSocket を同一ポートで自動判別）
@@ -131,6 +136,7 @@ FreebirdCollabo/
 ├─ tests/test_skinning.py    Vertex Group / Skinning 同期テスト（Automatic Weights・Weight Paint・Group 追加/Rename/削除・Armature Modifier・相手側メッシュの変形一致・Weight Paint 中の保留・再接続）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
 ├─ tests/test_relay_default.py Relay URL 既定値テスト（Room Code だけで接続・自前 URL・空欄フォールバック・Reset・Direct 非影響）
+├─ tests/test_undo.py        自分専用 Undo / Redo テスト（相手の作業を戻さない・Redo・競合・追加 / 削除・マテリアル・Pose・素早い連続 Create・bpy なしのステップ区切り unit）
 ├─ tests/test_glb_real.py    実 GLB ファイルを使った Import 同期テスト（COLLAB_GLBS でパス指定）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    自分で Relay を立てたい人向けの補足資料（Cloudflare Workers / quick tunnel / Python relay。通常は読まなくてよい）
@@ -142,7 +148,9 @@ FreebirdCollabo/
 ├─ docs/pose-sync-v0.8.md    Pose Mode ボーン Transform 同期（同期範囲・ループ防止・再接続・実機確認手順）
 ├─ docs/armature-sync-v0.9.md Armature / Bone 構造同期（同期範囲・Edit Mode 衝突時の扱い・Pose との順序・実機確認手順）
 ├─ docs/skinning-sync-v0.10.md Vertex Group / Skinning 同期（同期範囲・Weight Paint 中の扱い・Armature Modifier の参照解決・実機確認手順）
-└─ docs/material-node-sync-v0.11.md Shader Node Tree 同期（payload・差分・Image Texture 参照・対象外ノード・後方互換・実機確認手順）
+├─ docs/material-node-sync-v0.11.md Shader Node Tree 同期（payload・差分・Image Texture 参照・対象外ノード・後方互換・実機確認手順）
+├─ docs/collab-undo-handoff.md 自分専用 Undo / Redo（v0.12.0）の仕組み・わかっている制限
+└─ docs/collab-undo-manual-test.md 自分専用 Undo / Redo の実機確認手順
 ```
 
 ## テスト
@@ -164,6 +172,7 @@ python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
 python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, custom URL, Reset, Direct unchanged; "live" = also Check Relay)
+python3 tests/test_undo.py direct   # per-user Undo / Redo (same modes as above; "unit" = undo step grouping only, no bpy)
 ```
 
 `tests/test_sync.py` はホスト / ゲスト 2 プロセス（+ relay）を起動し、Create → Join → 正本共有 → Cube 移動の双方向同期 → 新規オブジェクト → 選択 / ツール presence → ホスト保存 までを自動検証する（PASS 済み）。
