@@ -2,8 +2,10 @@
 """
 Two-instance test of the per-user Undo / Redo in a room (no VR needed).
 
-    python3 tests/test_undo.py direct | relay
+    python3 tests/test_undo.py unit | direct | relay
     blender --background --factory-startup --python tests/blender_runner.py -- tests/test_undo.py direct
+
+"unit" checks only how history.py groups changes into undo steps (no bpy); direct / relay run it first.
 
 The bug it guards against: Blender's own Undo rewinds the whole scene, so undoing your own move also wiped
 the other user's work (locally, and then on their side through the sync). Checks, with HOST and GUEST:
@@ -14,6 +16,7 @@ the other user's work (locally, and then on their side through the sync). Checks
   5  material Base Color change -> undo restores the old colour on both
   6  pose bone rotation -> undo restores the rest pose on both
   7  the guest's own undo only reverts the guest's last change (host's work untouched)
+  8  host creates two boxes ~0.1 s apart -> one undo removes only the second one, on both
 """
 
 import os
@@ -93,6 +96,65 @@ def _setup_scene():
     ob.location = (-5.0, 0.0, 0.0)
     mat = bpy.data.materials.get("Material")
     mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (1.0, 0.0, 0.0, 1.0)
+
+
+def _load_history():
+    """history.py without the freebird_collab package (its __init__ needs bpy)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("collab_history", os.path.join(ROOT, "freebird_collab", "history.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_unit():
+    hist = _load_history()
+    M0, M1, M2 = [0.0], [1.0], [2.0]  # stand-ins for world matrices
+    INFO = {"data": "d"}  # stand-in for _object_info()
+
+    def steps(records):
+        """records: (kind, name, before, after, now). Returns the closed steps as lists of keys."""
+        h = hist.LocalHistory()
+        for r in records:
+            h.record(*r)
+        h.tick(1e9)
+        return [list(st.items) for st in h.undo_stack]
+
+    def check(name, got, want):
+        assert got == want, f"{name}: got {got}, want {want}"
+        print(f"UNIT OK: {name}")
+
+    # creates
+    check("two creates 0.1 s apart -> two steps",
+          steps([("o", "A", None, INFO, 0.0), ("o", "B", None, INFO, 0.1)]),
+          [[("o", "A")], [("o", "B")]])
+    check("one duplicate of several objects (same detection pass) -> one step",
+          steps([("o", "A", None, INFO, 0.0), ("o", "B", None, INFO, 0.0), ("o", "C", None, INFO, 0.0)]),
+          [[("o", "A"), ("o", "B"), ("o", "C")]])
+    check("drag right after duplicate -> same step as the add",
+          steps([("o", "A", None, INFO, 0.0), ("x", "A", M0, M1, 0.3), ("x", "A", M1, M2, 0.6)]),
+          [[("o", "A"), ("x", "A")]])
+    check("create right after a move -> new step",
+          steps([("x", "C", M0, M1, 0.0), ("o", "A", None, INFO, 0.05)]),
+          [[("x", "C")], [("o", "A")]])
+    check("create after idle -> new step, move after idle -> new step",
+          steps([("o", "A", None, INFO, 0.0), ("x", "A", M0, M1, 1.0)]),
+          [[("o", "A")], [("x", "A")]])
+    # unchanged: moves and deletes keep the time-based grouping
+    check("moves of two objects within 0.2 s -> one step",
+          steps([("x", "C", M0, M1, 0.0), ("x", "D", M0, M1, 0.1)]),
+          [[("x", "C"), ("x", "D")]])
+    check("move of another object 0.2 s+ later -> new step",
+          steps([("x", "C", M0, M1, 0.0), ("x", "D", M0, M1, 0.3)]),
+          [[("x", "C")], [("x", "D")]])
+    check("deletes within 0.2 s -> one step",
+          steps([("o", "A", INFO, None, 0.0), ("o", "B", INFO, None, 0.1)]),
+          [[("o", "A"), ("o", "B")]])
+    check("deletes 0.2 s+ apart -> two steps",
+          steps([("o", "A", INFO, None, 0.0), ("o", "B", INFO, None, 0.3)]),
+          [[("o", "A")], [("o", "B")]])
+    print("UNIT PASS")
 
 
 def run_host(mode):
@@ -200,6 +262,26 @@ def run_host(mode):
     _idle(s, 0.5)
     assert _near(_loc("Cube"), (6, 2, 3)) and "HBox" in bpy.data.objects and _near(_base(), (1, 0, 0, 1))
     print("HOST 7 OK: guest undo did not touch host's work")
+    _flag("g7", s)
+
+    # 8: two creates ~0.1 s apart are two undo steps: one undo removes only the second box, on both PCs
+    _idle(s)
+    bpy.ops.mesh.primitive_cube_add(size=0.5, location=(3, -4, 0))
+    bpy.context.active_object.name = "HC1"
+    _idle(s, 0.1)
+    bpy.ops.mesh.primitive_cube_add(size=0.5, location=(4, -4, 0))
+    bpy.context.active_object.name = "HC2"
+    _idle(s)
+    _write_state(h8_added=True)
+    _flag("g8_saw_both", s)
+    assert s.undo_local(), s.history.last_msg
+    assert "HC2" not in bpy.data.objects, "undo did not remove the second box"
+    assert "HC1" in bpy.data.objects, "one undo also removed the first box (both creates were one step)"
+    _write_state(h8=True)
+    _flag("g8", s)
+    _idle(s, 0.5)
+    assert "HC1" in bpy.data.objects and "HC2" not in bpy.data.objects
+    print("HOST 8 OK: quick creates are separate undo steps")
     _write_state(host_done=True)
     _idle(s, 0.5)
     s.leave()
@@ -291,14 +373,45 @@ def run_guest(mode):
     print("GUEST undo 2:", s.history.last_msg)
     assert _near(_loc("GSphere"), (0, 0, 4)), _loc("GSphere")
     assert "HBox" in bpy.data.objects and _near(_base(), (1, 0, 0, 1)), "guest undo touched the host's work"
+    _write_state(g7=True)
+
+    _flag("h8_added", s)
+    _wait(lambda: "HC1" in bpy.data.objects and "HC2" in bpy.data.objects, 10, s, "both host boxes")
+    _write_state(g8_saw_both=True)
+    _flag("h8", s)
+    _wait(lambda: "HC2" not in bpy.data.objects, 10, s, "HC2 removed by host undo")
+    _idle(s, 0.5)
+    assert "HC1" in bpy.data.objects, "host's one undo also removed HC1 here"
+    _write_state(g8=True)
+    print("GUEST 8 OK")
     _flag("host_done", s)
     s.leave()
     print("GUEST PASS")
 
 
+def _args():
+    return sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
+
+
+def _child_command(mode, role):
+    try:
+        import bpy
+
+        blender = bpy.app.binary_path
+    except ImportError:
+        blender = ""
+    if blender:
+        return [blender, "--background", "--factory-startup", "--python", __file__, "--", mode, role]
+    return [sys.executable, __file__, mode, role]
+
+
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else "direct"
-    role = sys.argv[2] if len(sys.argv) > 2 else None
+    args = _args()
+    mode = args[0] if args else "direct"
+    role = args[1] if len(args) > 1 else None
+    if mode == "unit":
+        run_unit()
+        return
     if role in ("host", "guest"):
         try:
             (run_host if role == "host" else run_guest)(mode)
@@ -311,6 +424,7 @@ def main():
         sys.stdout.flush()
         os._exit(code)  # the bpy wheel can hang in its exit handlers
 
+    run_unit()
     import glob
 
     for f in glob.glob(STATE + "*"):
@@ -323,9 +437,9 @@ def main():
             procs.append(subprocess.Popen([sys.executable, os.path.join(ROOT, "relay", "collab_relay.py"), str(PORT)]))
             time.sleep(1.0)
     run_mode = "direct" if mode == "direct" else "relay"
-    host = subprocess.Popen([sys.executable, __file__, run_mode, "host"], env=env)
+    host = subprocess.Popen(_child_command(run_mode, "host"), env=env)
     time.sleep(1.0)
-    guest = subprocess.Popen([sys.executable, __file__, run_mode, "guest"], env=env)
+    guest = subprocess.Popen(_child_command(run_mode, "guest"), env=env)
     rc_h, rc_g = host.wait(240), guest.wait(240)
     for p in procs:
         p.terminate()

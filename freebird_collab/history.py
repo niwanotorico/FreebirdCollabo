@@ -43,11 +43,12 @@ class Item:
 
 
 class Step:
-    __slots__ = ("items", "t_last")
+    __slots__ = ("items", "t_last", "t_add")
 
     def __init__(self, now):
         self.items = {}  # key -> Item, in recording order
         self.t_last = now
+        self.t_add = None  # detection pass that added objects in this step (one operation)
 
     def label(self):
         kinds = {"x": "move", "o": "add/delete", "s": "material slots", "p": "pose", "m": "material"}
@@ -93,12 +94,15 @@ class LocalHistory:
         if self.replaying:
             return
         key = (kind, name)
+        add = kind == "o" and after is not None
         step = self.open
-        if step is not None and (now - step.t_last >= STEP_IDLE or (key not in step.items and now - step.t_last >= STEP_SPLIT)):
+        if step is not None and (now - step.t_last >= STEP_IDLE or self._splits(step, key, add, now)):
             self._close()
             step = None
         if step is None:
             step = self.open = Step(now)
+        if add:
+            step.t_add = now
         it = step.items.get(key)
         if it is None:
             step.items[key] = Item(key, before, after, self.version(key))
@@ -110,6 +114,17 @@ class LocalHistory:
             it.ver = self.version(key)
         step.t_last = now
         self.redo_stack.clear()  # a new edit ends the redo chain, as everywhere else
+
+    @staticmethod
+    def _splits(step, key, add, now):
+        if add:
+            # every Create / Duplicate is its own step, however quick; objects added by ONE operation
+            # (multi-select Duplicate, GLB import) arrive in the same detection pass (same now) and stay together
+            return step.t_add != now
+        added = step.items.get(("o", key[1])) if key[0] == "x" else None
+        if added is not None and added.after is not None:
+            return False  # dragging what this step just added (Duplicate, then move) belongs to the add
+        return key not in step.items and now - step.t_last >= STEP_SPLIT
 
     def tick(self, now):
         if self.open is not None and now - self.open.t_last >= STEP_IDLE:
