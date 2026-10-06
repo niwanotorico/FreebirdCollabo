@@ -83,7 +83,7 @@ Do the same on every participant's PC.
    - The Relay URL is prefilled with the default public relay (`wss://freebird-relay.chickenos.workers.dev`). **Participants just enter the same Room Code and join** to connect over the internet.
 3. *(Freebird XR users only)* Copy `freebird_plugin/freebird_collab_menu.py` into `C:\Users\<name>\.freebird\plugins\`, then click **Reload All** in Freebird Settings. **Create / Join / Leave Room** will appear under **CUSTOM** in the VR menu.
 
-**Update notice (v0.12.1+):** When the add-on is enabled, it checks GitHub Releases once. If a newer version exists, a small red **Update available** button appears above **Create Room** in the COLLAB panel; clicking it just opens the Release page. Updating is optional: nothing is downloaded or installed automatically, and you can keep using your current version. If you're offline, the check is silently skipped.
+**Update notice (v0.12.1+):** When the add-on is enabled, it checks GitHub Releases once. If a newer version exists, a small red **Update available** button appears above **Create Room** in the COLLAB panel; clicking it downloads the official `freebird_collab_addon.zip` from that GitHub Release, verifies it, and replaces the installed add-on; then restart Blender. Updating only starts when you press the button (never automatic), and the button is disabled while you're in a room. If anything fails, your current version is left as it was. The button just opens the Release page instead when the Release has no official zip or the add-on is a development install (git checkout / link). If you're offline, the check is silently skipped.
 
 ### Advanced: connection settings (usually not needed)
 
@@ -117,6 +117,7 @@ FreebirdCollabo/
 │   ├─ __init__.py           UI, operators, timers, public API
 │   ├─ session.py            Sync logic (master scene sharing / Transform / object data / materials / Pose / Presence / running per-user Undo)
 │   ├─ update_check.py       "Update available" notice (checks GitHub Releases once on enable; notify only, never installs)
+│   ├─ updater.py            In-app update, only when the button is pressed (download to a temp folder → verify → swap the folder with rollback)
 │   ├─ history.py            Per-user Undo / Redo history (records only your own changes, step grouping, conflict checks) and the Freebird Undo hook
 │   ├─ object_data.py        Serializes and applies in place the contents of Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty/Armature, materials, and Node Trees
 │   ├─ presence.py           GPU drawing of others' head, hands, rays, selection outlines, and labels
@@ -143,6 +144,7 @@ FreebirdCollabo/
 ├─ tests/test_relay_default.py Relay URL default test (room-code-only join, custom URL, empty-field fallback, Reset, Direct unaffected)
 ├─ tests/test_undo.py        Per-user Undo / Redo test (others' work untouched, Redo, conflicts, add / delete, materials, Pose, quick successive creates, bpy-free unit test of step grouping)
 ├─ tests/test_update_check.py Update notice test (same / newer / older / draft / vr-studio tags, offline, Create / Join unaffected, no install code)
+├─ tests/test_updater.py     In-app update test (asset pick, zip-slip, SHA-256, swap + rollback, disabled in a room)
 ├─ tests/test_glb_real.py    Import sync test with real GLB files (set paths via COLLAB_GLBS)
 ├─ docs/research.md          Research notes, architecture, risks
 ├─ docs/internet-relay.md    For people who want to host their own relay (Cloudflare Workers / quick tunnel / Python relay; most users can skip this)
@@ -180,6 +182,7 @@ python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
 python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, custom URL, Reset, Direct unchanged; "live" = also Check Relay)
 python3 tests/test_undo.py direct   # per-user Undo / Redo (same modes as above; "unit" = undo step grouping only, no bpy)
 python3 tests/test_update_check.py    # update notice (no network needed; "live" = also ask the real GitHub Releases)
+blender -b --factory-startup --python tests/blender_runner.py -- tests/test_updater.py   # in-app update (temp folders only, no network)
 ```
 
 `tests/test_sync.py` launches a host and a guest process (plus a relay) and automatically verifies the full flow: Create → Join → sharing the master scene → two-way sync of moving a Cube → new objects → selection / tool presence → saving on the host. All of these pass.

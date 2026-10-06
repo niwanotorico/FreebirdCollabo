@@ -81,7 +81,7 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
    - Relay URL には既定の公開 Relay（`wss://freebird-relay.chickenos.workers.dev`）が最初から入っています。**参加者同士で同じ Room Code を入れて Join するだけ**でインターネット越しに接続できます
 3. （Freebird XR を使う場合のみ）`freebird_plugin/freebird_collab_menu.py` を `C:\Users\<name>\.freebird\plugins\` にコピー → Freebird Settings で **Reload All**（VR メニューの **CUSTOM** に Create / Join / Leave Room が出る）
 
-**更新通知（v0.12.1 以降）**：アドオン有効化時に GitHub Releases を 1 回だけ確認し、新しい版があれば COLLAB パネルの **Create Room** の上に小さな赤い **Update available** ボタンが出ます。押すと Release ページが開くだけです。更新は任意で、自動でダウンロード・インストールされることはなく、今の版を使い続けられます。オフライン時は何も表示されません。
+**更新通知（v0.12.1 以降）**：アドオン有効化時に GitHub Releases を 1 回だけ確認し、新しい版があれば COLLAB パネルの **Create Room** の上に小さな赤い **Update available** ボタンが出ます。押すと、その Release の正式配布 `freebird_collab_addon.zip` をダウンロードして検証し、インストール済みのアドオンを置き換えます。完了後は Blender を再起動してください。更新はボタンを押したときだけ始まり（自動更新はしません）、ルーム参加中はボタンが押せません。途中で失敗しても今の版はそのまま残ります。Release に正式 zip が無い場合や、開発用の入れ方（git チェックアウト / リンク）のときは、従来どおり Release ページを開くだけです。オフライン時は何も表示されません。
 
 ### 上級者向け：接続まわりの設定（通常は不要）
 
@@ -115,6 +115,7 @@ FreebirdCollabo/
 │   ├─ __init__.py           UI・オペレーター・タイマー・公開API
 │   ├─ session.py            同期ロジック（正本共有 / Transform / オブジェクトデータ / マテリアル / Pose / Presence / 自分専用 Undo の実行）
 │   ├─ update_check.py       更新通知（有効化時に GitHub Releases を 1 回確認。知らせるだけで自動更新はしない）
+│   ├─ updater.py            アプリ内更新（ボタンを押したときだけ。一時フォルダにDL → 検証 → フォルダ入れ替え、失敗時は元に戻す）
 │   ├─ history.py            自分専用 Undo / Redo の履歴（自分が送った変更だけを記録・ステップの区切り・競合判定）と Freebird の Undo フック
 │   ├─ object_data.py        Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty/Armature・マテリアル・Node Tree の内容をシリアライズ・in-place 適用
 │   ├─ presence.py           相手の頭・手・レイ・選択枠・ラベルの GPU 描画
@@ -141,6 +142,7 @@ FreebirdCollabo/
 ├─ tests/test_relay_default.py Relay URL 既定値テスト（Room Code だけで接続・自前 URL・空欄フォールバック・Reset・Direct 非影響）
 ├─ tests/test_undo.py        自分専用 Undo / Redo テスト（相手の作業を戻さない・Redo・競合・追加 / 削除・マテリアル・Pose・素早い連続 Create・bpy なしのステップ区切り unit）
 ├─ tests/test_update_check.py 更新通知テスト（同じ版 / 新しい版 / 古い版 / Draft / vr-studio タグ・オフライン・Create / Join 非影響・インストール処理なし）
+├─ tests/test_updater.py     アプリ内更新テスト（asset 特定・zip-slip・SHA-256・入れ替えとロールバック・ルーム中は無効）
 ├─ tests/test_glb_real.py    実 GLB ファイルを使った Import 同期テスト（COLLAB_GLBS でパス指定）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    自分で Relay を立てたい人向けの補足資料（Cloudflare Workers / quick tunnel / Python relay。通常は読まなくてよい）

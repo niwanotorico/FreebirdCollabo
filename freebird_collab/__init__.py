@@ -19,6 +19,7 @@ from bpy.props import EnumProperty, FloatVectorProperty, IntProperty, StringProp
 from . import history
 from . import presence
 from . import update_check
+from . import updater
 from .session import LOCAL_UNDO_MODES, CollabSession
 
 TICK_INTERVAL = 1.0 / 60.0
@@ -267,6 +268,43 @@ class COLLAB_OT_open_update_page(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_block_reason = None  # cached updater.blocked_reason(): "" = update allowed, text = why not
+
+
+def _update_block_reason():
+    global _block_reason
+    if _block_reason is None:
+        try:
+            _block_reason = updater.blocked_reason() or ""
+        except Exception as e:
+            _block_reason = f"cannot check install folder ({e})"
+    return _block_reason
+
+
+def _can_update_here():
+    """The newest release has the official zip and this install may be replaced in place."""
+    return bool(update_check.latest_asset) and not _update_block_reason()
+
+
+class COLLAB_OT_update_addon(bpy.types.Operator):
+    bl_idname = "collab.update_addon"
+    bl_label = "Update available"
+    bl_description = (
+        "Download the newest FreebirdCollabo from GitHub and replace this add-on. "
+        "Starts only when you press it; restart Blender afterwards. Unavailable while in a room"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return not _session.active and updater.state not in ("running", "done") and _can_update_here()
+
+    def execute(self, context):
+        if updater.start(bl_info["version"]):
+            if not bpy.app.timers.is_registered(_update_install_poll):
+                bpy.app.timers.register(_update_install_poll, first_interval=0.5, persistent=True)
+        return {"FINISHED"}
+
+
 class COLLAB_OT_copy_code(bpy.types.Operator):
     bl_idname = "collab.copy_code"
     bl_label = "Copy Room Code"
@@ -286,15 +324,37 @@ class COLLAB_PT_panel(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "COLLAB"
 
+    @staticmethod
+    def _draw_update(layout, in_room):
+        if updater.state == "running":
+            layout.label(text=f"Updating: {updater.message}", icon="TIME")
+            return
+        if updater.state == "done":
+            row = layout.row()
+            row.alert = True
+            row.label(text=updater.message, icon="CHECKMARK")
+            return
+        if updater.state == "error":
+            layout.label(text=updater.message[:80], icon="ERROR")
+        if not update_check.latest_version:
+            return
+        row = layout.row()
+        row.alert = True  # small red hint, like Freebird's own update notice
+        text = f"Update available ({update_check.latest_tag})"
+        if _can_update_here():
+            row.enabled = not in_room
+            row.operator("collab.update_addon", text=text, icon="IMPORT")
+            if in_room:
+                layout.label(text="Leave the room to update")
+        else:  # no official zip in the release, or a development install: just open the Release page
+            row.operator("collab.open_update_page", text=text, icon="URL")
+
     def draw(self, context):
         s = _session
         p = _prefs()
         layout = self.layout
+        self._draw_update(layout, s.active)
         if not s.active:
-            if update_check.latest_version:
-                row = layout.row()
-                row.alert = True  # small red hint, like Freebird's own update notice
-                row.operator("collab.open_update_page", text=f"Update available ({update_check.latest_tag})", icon="URL")
             layout.operator("collab.create_room", icon="WORLD")
             box = layout.box()
             box.prop(context.window_manager, "collab_join_target", text="Code" if p.mode == "RELAY" else "Host IP")
@@ -368,6 +428,12 @@ def _update_check_poll():
     return None
 
 
+def _update_install_poll():
+    """Keep the panel fresh while the update thread works, then stop."""
+    _redraw()
+    return 0.5 if updater.state == "running" else None
+
+
 def _start_update_check():
     # skip headless runs (tests / render farms); FREEBIRD_COLLAB_UPDATE_URL forces it for debugging
     if bpy.app.background and not os.environ.get("FREEBIRD_COLLAB_UPDATE_URL"):
@@ -392,6 +458,7 @@ classes = (
     COLLAB_OT_check_relay,
     COLLAB_OT_reset_relay_url,
     COLLAB_OT_open_update_page,
+    COLLAB_OT_update_addon,
     COLLAB_PT_panel,
 )
 
@@ -431,8 +498,9 @@ def register():
 
 
 def unregister():
-    if bpy.app.timers.is_registered(_update_check_poll):
-        bpy.app.timers.unregister(_update_check_poll)
+    for fn in (_update_check_poll, _update_install_poll):
+        if bpy.app.timers.is_registered(fn):
+            bpy.app.timers.unregister(fn)
     _session.leave()
     history.uninstall_freebird_hook()
     _unregister_keymaps()
