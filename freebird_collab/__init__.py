@@ -10,6 +10,7 @@ bl_info = {
     "category": "3D View",
 }
 
+import os
 import random
 
 import bpy
@@ -17,6 +18,7 @@ from bpy.props import EnumProperty, FloatVectorProperty, IntProperty, StringProp
 
 from . import history
 from . import presence
+from . import update_check
 from .session import LOCAL_UNDO_MODES, CollabSession
 
 TICK_INTERVAL = 1.0 / 60.0
@@ -255,6 +257,16 @@ class COLLAB_OT_redo(_RoomUndoBase, bpy.types.Operator):
         return {"FINISHED"}
 
 
+class COLLAB_OT_open_update_page(bpy.types.Operator):
+    bl_idname = "collab.open_update_page"
+    bl_label = "Update available"
+    bl_description = "A newer FreebirdCollabo is on GitHub. Opens the Release page in your browser (nothing is installed)"
+
+    def execute(self, context):
+        bpy.ops.wm.url_open(url=update_check.latest_url)
+        return {"FINISHED"}
+
+
 class COLLAB_OT_copy_code(bpy.types.Operator):
     bl_idname = "collab.copy_code"
     bl_label = "Copy Room Code"
@@ -279,6 +291,10 @@ class COLLAB_PT_panel(bpy.types.Panel):
         p = _prefs()
         layout = self.layout
         if not s.active:
+            if update_check.latest_version:
+                row = layout.row()
+                row.alert = True  # small red hint, like Freebird's own update notice
+                row.operator("collab.open_update_page", text=f"Update available ({update_check.latest_tag})", icon="URL")
             layout.operator("collab.create_room", icon="WORLD")
             box = layout.box()
             box.prop(context.window_manager, "collab_join_target", text="Code" if p.mode == "RELAY" else "Host IP")
@@ -343,6 +359,27 @@ def _redraw():
         pass
 
 
+def _update_check_poll():
+    """Redraw the panel once the background update check has finished, then stop."""
+    if not update_check.done:
+        return 1.0
+    if update_check.latest_version:
+        _redraw()
+    return None
+
+
+def _start_update_check():
+    # skip headless runs (tests / render farms); FREEBIRD_COLLAB_UPDATE_URL forces it for debugging
+    if bpy.app.background and not os.environ.get("FREEBIRD_COLLAB_UPDATE_URL"):
+        return
+    try:
+        update_check.start(bl_info["version"])
+        if not bpy.app.timers.is_registered(_update_check_poll):
+            bpy.app.timers.register(_update_check_poll, first_interval=1.0, persistent=True)
+    except Exception:
+        pass  # never let the update notice break the add-on
+
+
 classes = (
     COLLAB_Preferences,
     COLLAB_OT_create_room,
@@ -354,6 +391,7 @@ classes = (
     COLLAB_OT_redo,
     COLLAB_OT_check_relay,
     COLLAB_OT_reset_relay_url,
+    COLLAB_OT_open_update_page,
     COLLAB_PT_panel,
 )
 
@@ -389,9 +427,12 @@ def register():
     presence.register(get_session)
     if not bpy.app.timers.is_registered(_timer):
         bpy.app.timers.register(_timer, first_interval=0.5, persistent=True)
+    _start_update_check()
 
 
 def unregister():
+    if bpy.app.timers.is_registered(_update_check_poll):
+        bpy.app.timers.unregister(_update_check_poll)
     _session.leave()
     history.uninstall_freebird_hook()
     _unregister_keymaps()
