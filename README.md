@@ -1,5 +1,12 @@
 # FreebirdCollabo
 
+📦 Easy download (BOOTH)
+https://niwanotorico.booth.pm/items/8945917
+
+The green “Code → Download ZIP” button is not the installable add-on package.
+For the easiest setup, download the prepared ZIP from BOOTH.
+
+
 **Real-time multi-user collaboration for Blender — with or without VR.**
 
 [日本語版 README](README_JA.md)
