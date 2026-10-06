@@ -4,7 +4,7 @@
 
 [日本語版 README](README_JA.md)
 
-> ⚠️ **Public Alpha (v0.12.0)** — FreebirdCollabo is still in early development. Please back up any important `.blend` files before using it.
+> ⚠️ **Public Alpha (v0.12.1)** — FreebirdCollabo is still in early development. Please back up any important `.blend` files before using it.
 
 FreebirdCollabo is a Blender add-on that keeps a single Blender scene in sync across multiple Blender instances in real time.
 
@@ -33,7 +33,7 @@ Once the host's scene loads on your side, you're connected. From then on, everyo
 - You can see other people's **selected objects** and **active tool** in the desktop 3D Viewport. With Freebird XR, their **head (HMD), both hands, and pointer rays** are also drawn — in both the VR view and on the desktop.
 - The UI is just **Create Room / Join Room / Leave Room** in the `COLLAB` panel (N panel). With Freebird XR, you can also use them from the VR menu.
 
-## What gets synced (v0.12.0)
+## What gets synced (v0.12.1)
 
 Everything below has been verified on real machines with Blender 5.2.
 
@@ -83,6 +83,8 @@ Do the same on every participant's PC.
    - The Relay URL is prefilled with the default public relay (`wss://freebird-relay.chickenos.workers.dev`). **Participants just enter the same Room Code and join** to connect over the internet.
 3. *(Freebird XR users only)* Copy `freebird_plugin/freebird_collab_menu.py` into `C:\Users\<name>\.freebird\plugins\`, then click **Reload All** in Freebird Settings. **Create / Join / Leave Room** will appear under **CUSTOM** in the VR menu.
 
+**Update notice (v0.12.1+):** When the add-on is enabled, it checks GitHub Releases once. If a newer version exists, a small red **Update available** button appears above **Create Room** in the COLLAB panel; clicking it just opens the Release page. Updating is optional: nothing is downloaded or installed automatically, and you can keep using your current version. If you're offline, the check is silently skipped.
+
 ### Advanced: connection settings (usually not needed)
 
 - **Can't connect?** Click **Check Relay** in the add-on preferences and check that it shows `OK xxx ms`. If it shows `NG`, check your network (e.g. a corporate network or firewall) and look at the `[collab]` lines under **Window > Toggle System Console**.
@@ -90,7 +92,7 @@ Do the same on every participant's PC.
 - **Direct (IP address):** Set **Connection** to **Direct** to skip the relay; the host listens on port 7788. Guests enter the host's IP address (LAN, or a VPN such as Tailscale) in the `Host IP` field instead of the Code field. Intended for LAN use and debugging.
 - **Upgrading from v0.11.0 or earlier:** If you had entered a Relay URL manually, that value is kept after the update. Click ↺ if you want to switch to the default relay.
 - **Mixing v0.12.0 and v0.11.x:** The message format is unchanged, so they can connect. However, Undo on v0.11.x or earlier is Blender's whole-file Undo and rewinds other people's work too. **We recommend that everyone updates to v0.12.0.**
-- **Mixing versions:** Add-on versions v0.11.0 and earlier have no default Relay URL. If someone is still on an older version, ask them to update to the latest version (v0.12.0). (Mixed versions still connect, but older versions require entering the Relay URL manually.)
+- **Mixing versions:** Add-on versions v0.11.0 and earlier have no default Relay URL. If someone is still on an older version, ask them to update to the latest version (v0.12.1). (Mixed versions still connect, but older versions require entering the Relay URL manually.)
 
 ## Usage
 
@@ -114,6 +116,7 @@ FreebirdCollabo/
 ├─ freebird_collab/          The Blender add-on (place the whole folder in scripts/addons)
 │   ├─ __init__.py           UI, operators, timers, public API
 │   ├─ session.py            Sync logic (master scene sharing / Transform / object data / materials / Pose / Presence / running per-user Undo)
+│   ├─ update_check.py       "Update available" notice (checks GitHub Releases once on enable; notify only, never installs)
 │   ├─ history.py            Per-user Undo / Redo history (records only your own changes, step grouping, conflict checks) and the Freebird Undo hook
 │   ├─ object_data.py        Serializes and applies in place the contents of Mesh/Curve/Grease Pencil/Text/Light/Camera/Empty/Armature, materials, and Node Trees
 │   ├─ presence.py           GPU drawing of others' head, hands, rays, selection outlines, and labels
@@ -121,7 +124,7 @@ FreebirdCollabo/
 │   ├─ link.py               TCP client (receive thread → queue to the main thread)
 │   ├─ protocol.py           Message definitions (4-byte length + JSON)
 │   └─ ws.py                 WebSocket implementation (stdlib only) — so the relay can run on free HTTP hosting
-├─ freebird_collab_addon.zip  Distribution zip of the add-on (v0.12.0; install via Preferences > Add-ons > Install from Disk)
+├─ freebird_collab_addon.zip  Distribution zip of the add-on (v0.12.1; install via Preferences > Add-ons > Install from Disk)
 ├─ freebird_plugin/
 │   └─ freebird_collab_menu.py   Plugin that adds COLLAB buttons to the Freebird VR menu (Freebird XR only)
 ├─ relay/collab_relay.py     Relay server (no dependencies; auto-detects TCP and WebSocket on the same port)
@@ -139,6 +142,7 @@ FreebirdCollabo/
 ├─ tests/test_glb.py         GLB import sync test during a session (bidirectional, hierarchy, multiple meshes, editing after import)
 ├─ tests/test_relay_default.py Relay URL default test (room-code-only join, custom URL, empty-field fallback, Reset, Direct unaffected)
 ├─ tests/test_undo.py        Per-user Undo / Redo test (others' work untouched, Redo, conflicts, add / delete, materials, Pose, quick successive creates, bpy-free unit test of step grouping)
+├─ tests/test_update_check.py Update notice test (same / newer / older / draft / vr-studio tags, offline, Create / Join unaffected, no install code)
 ├─ tests/test_glb_real.py    Import sync test with real GLB files (set paths via COLLAB_GLBS)
 ├─ docs/research.md          Research notes, architecture, risks
 ├─ docs/internet-relay.md    For people who want to host their own relay (Cloudflare Workers / quick tunnel / Python relay; most users can skip this)
@@ -175,6 +179,7 @@ python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
 python3 tests/test_relay_default.py    # Relay URL preset (room-code-only join, custom URL, Reset, Direct unchanged; "live" = also Check Relay)
 python3 tests/test_undo.py direct   # per-user Undo / Redo (same modes as above; "unit" = undo step grouping only, no bpy)
+python3 tests/test_update_check.py    # update notice (no network needed; "live" = also ask the real GitHub Releases)
 ```
 
 `tests/test_sync.py` launches a host and a guest process (plus a relay) and automatically verifies the full flow: Create → Join → sharing the master scene → two-way sync of moving a Cube → new objects → selection / tool presence → saving on the host. All of these pass.
