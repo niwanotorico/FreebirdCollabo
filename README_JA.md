@@ -1,5 +1,12 @@
 # FreebirdCollabo
 
+📦 かんたんダウンロード（BOOTH）
+https://niwanotorico.booth.pm/items/8945917
+
+GitHubの「Code → Download ZIP」は配布用ZIPではありません。
+はじめての方はBOOTHからのダウンロードがおすすめです。
+
+
 **Blender のためのリアルタイム共同編集アドオン — VR があってもなくても使えます。**
 
 [English README](README.md)
