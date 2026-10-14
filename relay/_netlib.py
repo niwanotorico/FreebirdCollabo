@@ -23,7 +23,7 @@ def _load():
     pkg.__path__ = [os.path.join(ROOT, "freebird_collab")]
     pkg.__package__ = PKG
     sys.modules[PKG] = pkg
-    for name in ("protocol", "ws", "hub", "link"):  # order matters (dependencies first)
+    for name in ("protocol", "ws", "hub", "traffic", "link"):  # order matters (dependencies first)
         path = os.path.join(ROOT, "freebird_collab", f"{name}.py")
         spec = importlib.util.spec_from_file_location(f"{PKG}.{name}", path)
         mod = importlib.util.module_from_spec(spec)

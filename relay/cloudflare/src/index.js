@@ -9,6 +9,11 @@
 // Limits to keep in mind: WebSocket messages <= 1 MiB (the add-on splits bigger
 // ones into "chunk" messages, which are just forwarded), free plan 100k
 // requests/day where 20 incoming WS messages = 1 request.
+//
+// Load reduction (docs/relay-load-analysis.md), both invisible to older add-ons:
+//   * {"t":"ping"} is answered by the runtime (auto-response), so keep-alives never wake the object.
+//   * welcome.batch = 1 lets newer add-ons send one tick's small messages as {"t":"batch", m:[...]};
+//     each one is forwarded on its own, so every peer receives exactly the old messages.
 
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -53,6 +58,8 @@ export class Hub {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
+    // Byte-exact JSON every add-on version sends (protocol.encode: compact separators).
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"t":"ping"}', '{"t":"pong"}'));
   }
 
   async fetch(request) {
@@ -108,12 +115,24 @@ export class Hub {
     const t = msg.t;
 
     if (t === "hello") return this._hello(ws, me, msg);
-    if (t === "ping") return this._send(ws, { t: "pong" });
+    if (t === "batch") {
+      if (!Array.isArray(msg.m)) return;
+      const peers = me.room ? this._peers(me.room, ws) : [];
+      for (const m of msg.m) {
+        if (m && typeof m === "object" && m.t !== "hello" && m.t !== "batch") this._route(ws, me, m, peers);
+      }
+      return;
+    }
+    this._route(ws, me, msg);
+  }
+
+  _route(ws, me, msg, peers) {
+    if (msg.t === "ping") return this._send(ws, { t: "pong" }); // auto-response normally answers first
     if (!me.room) return this._send(ws, { t: "error", msg: "not in a room" });
 
     msg.from = me.uid;
     const to = msg.to;
-    for (const [peer, a] of this._peers(me.room, ws)) {
+    for (const [peer, a] of peers || this._peers(me.room, ws)) {
       if (to && a.uid !== to) continue;
       this._send(peer, msg);
     }
@@ -139,7 +158,7 @@ export class Hub {
 
     const peers = this._peers(code, ws).map(([, a]) => ({ uid: a.uid, name: a.name, role: a.role, color: a.color }));
     const host = peers.find((p) => p.role === "host");
-    this._send(ws, { t: "welcome", uid: me.uid, room: code, peers, host_uid: host ? host.uid : role === "host" ? me.uid : null, version: 1 });
+    this._send(ws, { t: "welcome", uid: me.uid, room: code, peers, host_uid: host ? host.uid : role === "host" ? me.uid : null, version: 1, batch: 1 });
     for (const [peer] of this._peers(code, ws)) {
       this._send(peer, { t: "peer_join", uid: me.uid, name, role, color });
     }

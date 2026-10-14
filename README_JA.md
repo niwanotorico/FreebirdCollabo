@@ -146,6 +146,7 @@ FreebirdCollabo/
 ├─ tests/test_armature.py    Armature / Bone 構造同期テスト（接続中の Armature 新規作成・Bone 追加/削除/Rename・head/tail/roll・parent/connected・Edit Mode 中の保留・再接続・Pose 連携）
 ├─ tests/test_skinning.py    Vertex Group / Skinning 同期テスト（Automatic Weights・Weight Paint・Group 追加/Rename/削除・Armature Modifier・相手側メッシュの変形一致・Weight Paint 中の保留・再接続）
 ├─ tests/test_glb.py         接続中の GLB Import 同期テスト（双方向・階層・複数 Mesh・Import 後の編集）
+├─ tests/test_relay_traffic.py  Relay 通信量削減と互換のテスト（v0.12.1 を含む 3 人・参加 / 退出 / 再参加・旧 Relay）
 ├─ tests/test_relay_default.py Relay URL 既定値テスト（Room Code だけで接続・自前 URL・空欄フォールバック・Reset・Direct 非影響）
 ├─ tests/test_undo.py        自分専用 Undo / Redo テスト（相手の作業を戻さない・Redo・競合・追加 / 削除・マテリアル・Pose・素早い連続 Create・bpy なしのステップ区切り unit）
 ├─ tests/test_update_check.py 更新通知テスト（同じ版 / 新しい版 / 古い版 / Draft / vr-studio タグ・オフライン・Create / Join 非影響・インストール処理なし）
@@ -153,6 +154,7 @@ FreebirdCollabo/
 ├─ tests/test_glb_real.py    実 GLB ファイルを使った Import 同期テスト（COLLAB_GLBS でパス指定）
 ├─ docs/research.md          調査メモ・アーキテクチャ・リスク
 ├─ docs/internet-relay.md    自分で Relay を立てたい人向けの補足資料（Cloudflare Workers / quick tunnel / Python relay。通常は読まなくてよい）
+├─ docs/relay-load-analysis.md  公開 Relay の負荷（Cloudflare 無料枠）：何を送っているか・何が課金されるか・変更前後の数字
 ├─ docs/machida-merge-v0.4.md 外部からの修正提案の統合レビュー（採用/不採用/理由）・同期対象一覧
 ├─ docs/glb-import-v0.5.md   接続中の GLB Import 同期（原因・階層/マテリアル対応・未対応事項）
 ├─ docs/textures-v0.6.md     Base Color テクスチャ＋UV の転送（画像の再送なし・未対応事項）
@@ -181,6 +183,7 @@ python3 tests/test_grease_pencil.py direct  # Grease Pencil create/draw/edit syn
 python3 tests/test_materials.py direct  # material sync (same modes as above; "unit" = single-process part only)
 python3 tests/test_material_nodes.py direct  # shader node tree sync
 python3 tests/test_glb.py direct    # GLB import during a session (same modes as above)
+python3 tests/test_relay_traffic.py  # relay traffic reduction + mixing with v0.12.1 (unit part runs without Blender)
 python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync

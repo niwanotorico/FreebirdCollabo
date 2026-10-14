@@ -148,6 +148,7 @@ FreebirdCollabo/
 ├─ tests/test_armature.py    Armature / Bone structure sync test (new Armature while connected, add/delete/rename bones, head/tail/roll, parent/connected, held changes during Edit Mode, reconnect, Pose interaction)
 ├─ tests/test_skinning.py    Vertex Group / Skinning sync test (Automatic Weights, Weight Paint, add/rename/delete groups, Armature Modifier, matching mesh deformation on the other side, held changes during Weight Paint, reconnect)
 ├─ tests/test_glb.py         GLB import sync test during a session (bidirectional, hierarchy, multiple meshes, editing after import)
+├─ tests/test_relay_traffic.py  Relay traffic reduction + compatibility test (3 users incl. v0.12.1, join / leave / rejoin, old relay)
 ├─ tests/test_relay_default.py Relay URL default test (room-code-only join, custom URL, empty-field fallback, Reset, Direct unaffected)
 ├─ tests/test_undo.py        Per-user Undo / Redo test (others' work untouched, Redo, conflicts, add / delete, materials, Pose, quick successive creates, bpy-free unit test of step grouping)
 ├─ tests/test_update_check.py Update notice test (same / newer / older / draft / vr-studio tags, offline, Create / Join unaffected, no install code)
@@ -155,6 +156,7 @@ FreebirdCollabo/
 ├─ tests/test_glb_real.py    Import sync test with real GLB files (set paths via COLLAB_GLBS)
 ├─ docs/research.md          Research notes, architecture, risks
 ├─ docs/internet-relay.md    For people who want to host their own relay (Cloudflare Workers / quick tunnel / Python relay; most users can skip this)
+├─ docs/relay-load-analysis.md  Relay load (Cloudflare free plan): what is sent, what is billed, before / after numbers
 ├─ docs/machida-merge-v0.4.md Review of merged external patch proposals (adopted / rejected / reasons), list of sync targets
 ├─ docs/glb-import-v0.5.md   GLB import sync during a session (root cause, hierarchy/material support, unsupported items)
 ├─ docs/textures-v0.6.md     Base Color texture + UV transfer (no image resending, unsupported items)
@@ -183,6 +185,7 @@ python3 tests/test_grease_pencil.py direct  # Grease Pencil create/draw/edit syn
 python3 tests/test_materials.py direct  # material sync (same modes as above; "unit" = single-process part only)
 python3 tests/test_material_nodes.py direct  # shader node tree sync
 python3 tests/test_glb.py direct    # GLB import during a session (same modes as above)
+python3 tests/test_relay_traffic.py  # relay traffic reduction + mixing with v0.12.1 (unit part runs without Blender)
 python3 tests/test_pose.py direct   # Pose Mode bone transform sync
 python3 tests/test_armature.py direct  # Armature / Bone structure sync
 python3 tests/test_skinning.py direct  # Vertex Group / Skinning sync
