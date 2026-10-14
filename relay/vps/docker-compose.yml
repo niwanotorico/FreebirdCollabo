@@ -1,0 +1,44 @@
+# Relay + Caddy, the same layout as the VPS (systemd) setup, in Docker.
+#
+# Local reproduction (self-signed "localhost" certificate from Caddy's internal CA):
+#   cd relay/vps
+#   RELAY_DOMAIN=localhost HTTP_PORT=8080 HTTPS_PORT=8443 docker compose up -d --build
+#   -> wss://localhost:8443   (tests: see docs/vps-migration-ja.md "Docker で手元確認")
+#
+# On a VPS (alternative to systemd):  RELAY_DOMAIN=relay.<your domain> docker compose up -d --build
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: relay/vps/Dockerfile
+    restart: unless-stopped
+    env_file: freebird-relay.env
+    expose:
+      - "7788"          # reachable from Caddy only, never published on the host
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }   # log rotation
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [relay]
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:-localhost}
+      RELAY_UPSTREAM: relay:7788
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # certificates (keep this volume, or Let's Encrypt rate limits bite)
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  caddy_data:
+  caddy_config:
+  caddy_logs:
