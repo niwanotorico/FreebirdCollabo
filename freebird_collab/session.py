@@ -20,10 +20,11 @@ from . import hub as hubmod
 from . import history as histmod
 from .link import Link
 from . import object_data
+from . import traffic
 from .protocol import make
 
 EPS = 1e-4
-PRESENCE_HZ = 20.0
+PRESENCE_HZ = traffic.PRESENCE_HZ  # sampling rate; it only goes out when it changed or for the heartbeat (traffic.py)
 XFORM_HZ = 30.0
 PING_SECONDS = 20.0
 DATA_HZ = 5.0  # max obj_data checks/sends per second (per object)
@@ -133,6 +134,7 @@ class CollabSession:
         self.tracked = {}  # obj name -> last known matrix list
         self.known = set()  # object names present last tick
         self._last_presence_t = 0.0
+        self._presence_gate = traffic.PresenceThrottle()
         self._last_xform_t = 0.0
         self._last_ping_t = 0.0
         self._scene_loaded_from_host = False
@@ -267,6 +269,7 @@ class CollabSession:
         self._restore_info.clear()
         histmod.uninstall_freebird_hook()
         self._last_hook_t = 0.0
+        self._presence_gate = traffic.PresenceThrottle()
         self._scene_loaded_from_host = False
         self._pending_scene = None
         self._deferred = []
@@ -361,6 +364,14 @@ class CollabSession:
     def tick(self):
         if not self.link:
             return
+        link = self.link
+        link.begin_batch()  # everything this tick sends shares as few relay messages as possible
+        try:
+            self._tick()
+        finally:
+            link.end_batch()
+
+    def _tick(self):
         for msg in self.link.poll():
             self.stats["rx"] += 1
             try:
@@ -421,7 +432,7 @@ class CollabSession:
         self._check_peer_versions(now)
         if now - self._last_presence_t >= 1.0 / PRESENCE_HZ:
             self._last_presence_t = now
-            self._send_presence()
+            self._send_presence(now)
         if now - self._last_ping_t >= PING_SECONDS:  # keep proxies / tunnels from idling us out
             self._last_ping_t = now
             self._send(make("ping"))
@@ -440,6 +451,7 @@ class CollabSession:
             self.uid = msg["uid"]
             self.room = msg["room"]
             self.host_uid = msg.get("host_uid")
+            self.link.can_batch = bool(msg.get("batch"))  # older hubs do not say so: never batch for them
             for p in msg.get("peers", []):
                 self.peers[p["uid"]] = Peer(p["uid"], p["name"], p["role"], p.get("color"))
             self.status = f"{'HOST' if self.role == 'host' else 'JOINED'} room {self.room}"
@@ -464,6 +476,7 @@ class CollabSession:
             if self.role == "host":
                 self._send_scene(p.uid)
             self._send(make("ver", to=p.uid, v=ADDON_VERSION))
+            self._presence_gate.reset()  # the newcomer should see us right away, not at the next heartbeat
             self._notify()
         elif t == "ver":
             p = self.peers.get(msg.get("from"))
@@ -1584,11 +1597,13 @@ class CollabSession:
     # ------------------------------------------------------------------
     # presence (head / hands / ray / selection / tool)
     # ------------------------------------------------------------------
-    def _send_presence(self):
+    def _send_presence(self, now=None):
         pres = sample_local_presence()
         pres.update(name=self.name, color=list(self.color))
         self.local_presence = pres
-        self._send(make("presence", **pres))
+        # unchanged presence only goes out as a heartbeat, and not at all while we are alone in the room
+        if self._presence_gate.should_send(time.time() if now is None else now, pres, bool(self.peers)):
+            self._send(make("presence", **pres))
 
     def request_save(self):
         if self.role == "host":

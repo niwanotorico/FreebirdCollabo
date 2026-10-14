@@ -19,6 +19,7 @@ import threading
 
 from . import ws as wsmod
 from .protocol import Decoder, encode
+from .traffic import batch_groups
 
 
 CHUNK_BYTES = 700 * 1024  # Cloudflare Workers/DO cap WebSocket messages at 1 MiB; split bigger ones
@@ -39,6 +40,9 @@ class Link:
         self._stop = threading.Event()
         self._rx = None
         self._tx = None
+        self.can_batch = False  # the hub announced welcome.batch: one tick's small messages may share a frame
+        self._held = None  # list while a batch is open (begin_batch / end_batch)
+        self.frames_tx = 0  # WebSocket / TCP messages written = what the relay has to process (tx thread)
 
     # ------------------------------------------------------------------
     def connect(self, timeout=10.0):
@@ -79,8 +83,22 @@ class Link:
             pass
 
     def send(self, msg: dict):
-        if self.connected:
-            self.outbox.put(msg)
+        if not self.connected:
+            return
+        if self._held is not None:
+            self._held.append(msg)
+            return
+        self.outbox.put(msg)
+
+    def begin_batch(self):
+        """Hold messages until end_batch(); only effective when the hub can unpack batches."""
+        if self.can_batch and self._held is None:
+            self._held = []
+
+    def end_batch(self):
+        held, self._held = self._held, None
+        for m in batch_groups(held or ()):
+            self.send(m)
 
     def poll(self, max_items=200):
         out = []
@@ -100,11 +118,13 @@ class Link:
     def _encode(self, msg: dict) -> bytes:
         body = encode(msg)[4:]
         if len(body) <= CHUNK_BYTES:
+            self.frames_tx += 1
             return self._frame(body)
         # split into chunk messages; the hub forwards them like any other message
         text = body.decode("utf-8")
         cid = os.urandom(4).hex()
         n = (len(text) + CHUNK_BYTES - 1) // CHUNK_BYTES
+        self.frames_tx += n
         out = bytearray()
         for i in range(n):
             part = {"t": "chunk", "id": cid, "i": i, "n": n, "d": text[i * CHUNK_BYTES : (i + 1) * CHUNK_BYTES]}

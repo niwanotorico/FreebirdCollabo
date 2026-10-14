@@ -158,6 +158,11 @@ class Hub:
         if t == "hello":
             self._hello(c, msg)
             return
+        if t == "batch":  # several messages of one client tick in one frame: route each on its own
+            for m in msg.get("m") or ():
+                if isinstance(m, dict) and m.get("t") not in ("hello", "batch"):
+                    self._handle(c, m)
+            return
         if t == "ping":
             c.send(make("pong"))
             return
@@ -200,7 +205,7 @@ class Hub:
                 {"uid": p.uid, "name": p.name, "role": p.role, "color": p.color} for p in room.values() if p is not c
             ]
             host_uid = next((p.uid for p in room.values() if p.role == "host"), None)
-        c.send(make("welcome", uid=c.uid, room=code, peers=peers, host_uid=host_uid, version=1))
+        c.send(make("welcome", uid=c.uid, room=code, peers=peers, host_uid=host_uid, version=1, batch=1))
         self._broadcast(c, make("peer_join", uid=c.uid, name=c.name, role=c.role, color=c.color))
         self.log(f"[hub] {c.name}({c.role}) joined room {code}")
 

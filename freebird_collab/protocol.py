@@ -9,14 +9,15 @@ Routing : every message carries "t" (type). The hub (relay or direct host)
 
 Message types (client -> hub -> peers):
   hello           {name, role: host|guest, room, color}     first message, hub replies welcome
-  welcome         {uid, room, peers:[{uid,name,role,color}], host_uid}
+  welcome         {uid, room, peers:[{uid,name,role,color}], host_uid, batch:1}  batch = hub unpacks "batch" (newer hubs only)
   peer_join       {uid, name, role, color}
   peer_leave      {uid}
   ver             {v}                                        add-on version, sent after welcome and to each joiner
   error           {msg}
   scene           {to, blend_b64, filename}                  host -> new guest, one-shot
   presence        {vr, head:[x,y,z,qw,qx,qy,qz]|null, hands:{L:[..7 + ray(0/1)], R:[..]},
-                   tool, sel:[names], mode}                  ~20 Hz
+                   tool, sel:[names], mode}                  up to 20 Hz while it changes, else a 1 s heartbeat;
+                                                             not sent while alone in the room (traffic.py)
   xform           {objs:{name:[16 floats]}}                  only for changed objects
   obj_add         {name, type, payload:{type, data}, m:[16], parent:name|null,
                    mats:[{n, c:[rgba], p, tex, tx, ...}|null]} (see object_data.py)
@@ -46,7 +47,10 @@ Message types (client -> hub -> peers):
   chunk           {id, i, n, d}                                 link.py splits messages > 700 KB
   obj_del         {names:[..]}
   save            {}                                         guest -> host: please save master
-  ping / pong     {}
+  ping / pong     {}                                         the Cloudflare relay answers {"t":"ping"} by auto-response
+  batch           {m:[msg, ...]}                             client -> hub only, when welcome.batch: one tick's small
+                                                             messages in one frame; the hub routes each one on its own,
+                                                             so peers never see a batch (traffic.py)
 """
 
 import json
