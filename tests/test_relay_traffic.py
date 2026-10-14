@@ -474,6 +474,7 @@ def run_live(old_relay):
     rcs = [p.wait(240) for p in (host, a, b)]
     for p in procs:
         p.terminate()
+        p.wait(10)  # free the port before the next run_live() checks it
     label = "v0.12.1 relay" if old_relay else (os.environ.get("COLLAB_RELAY_URL") or "new relay")
     print(f"\n=== LIVE ({label}): host rc={rcs[0]} guestA rc={rcs[1]} guestOld rc={rcs[2]} ===")
     return all(rc == 0 for rc in rcs)

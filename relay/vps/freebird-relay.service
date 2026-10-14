@@ -1,0 +1,60 @@
+# Freebird Collab relay — systemd service (Ubuntu 22.04 / 24.04)
+#
+#   sudo cp freebird-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now freebird-relay
+#   journalctl -u freebird-relay -f          # logs (rotated by journald, see journald-freebird.conf)
+#
+# Expects the repository at /opt/freebird-relay (git clone) and a system user "freebird"
+# (sudo useradd --system --no-create-home --shell /usr/sbin/nologin freebird).
+# Limits are changed in /etc/freebird-relay.env (see freebird-relay.env), not here.
+
+[Unit]
+Description=Freebird Collab relay (room-code WebSocket relay)
+Documentation=https://github.com/niwanotorico/FreebirdCollabo/blob/main/docs/vps-migration-ja.md
+After=network-online.target
+Wants=network-online.target
+# give up only after 20 crashes within 5 minutes (then: systemctl reset-failed + start)
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=freebird
+Group=freebird
+WorkingDirectory=/opt/freebird-relay
+EnvironmentFile=-/etc/freebird-relay.env
+Environment=PYTHONUNBUFFERED=1
+# 127.0.0.1: only Caddy (wss://, port 443) can reach the relay; port 7788 is never public
+ExecStart=/usr/bin/python3 /opt/freebird-relay/relay/collab_relay.py --host 127.0.0.1 7788
+# crash / kill -> restart after 3 s.  "systemctl stop" does not restart.
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# resources: one thread + one socket per connection
+LimitNOFILE=4096
+TasksMax=1024
+MemoryMax=512M
+
+# hardening: the relay needs nothing but the network
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

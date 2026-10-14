@@ -25,6 +25,7 @@ HOST Blender ──wss──▶ Relay（HTTPS/WebSocket・固定URL）◀──w
 | **① Cloudflare Workers + DO** | 無料 | Cloudflare（メールのみ） | ○ `xxx.workers.dev` | 本命。常時起動 |
 | ② Render Free | 無料 | Render | ○ | 予備（15 分でスリープ、復帰 1 分） |
 | Direct / Python relay | 無料 | 不要 | LAN 内 | 従来通り |
+| ④ VPS（Python relay + Caddy、`relay/vps/`） | 月 1,000 円前後 | VPS・ドメイン | ○ 自分のドメイン | Cloudflare の無料枠が足りなくなった時の移行先。手順は [`vps-migration-ja.md`](vps-migration-ja.md) |
 
 ---
 

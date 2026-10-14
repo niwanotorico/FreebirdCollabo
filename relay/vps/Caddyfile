@@ -1,0 +1,30 @@
+# Freebird Collab relay — Caddy (HTTPS / wss:// with automatic Let's Encrypt certificates)
+#
+# VPS:    sudo cp Caddyfile /etc/caddy/Caddyfile
+#         sudo sed -i 's/relay.example.com/<your domain>/' /etc/caddy/Caddyfile
+#         sudo systemctl reload caddy
+# Docker: docker-compose.yml sets RELAY_DOMAIN and RELAY_UPSTREAM instead of editing this file.
+#
+# The add-on then uses   Relay URL:  wss://<your domain>
+# Requirements for the certificate: the domain's A record points at this server and
+# ports 80 + 443 are open (ufw-setup.sh).
+
+{$RELAY_DOMAIN:relay.example.com} {
+	# WebSocket upgrade, / health check and /stats all go to the Python relay
+	reverse_proxy {$RELAY_UPSTREAM:127.0.0.1:7788}
+	# Caddy 2.7+ only (official Caddy apt repo; Ubuntu's own "caddy" package is 2.6 and would
+	# refuse to start with it): keep open sessions on "systemctl reload caddy" instead of cutting
+	# them.  To use it, replace the line above with:
+	#   reverse_proxy {$RELAY_UPSTREAM:127.0.0.1:7788} {
+	#   	stream_close_delay 1h
+	#   }
+
+	# access log (one line per connection), rotated by Caddy itself
+	log {
+		output file /var/log/caddy/freebird-relay-access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 720h
+		}
+	}
+}
