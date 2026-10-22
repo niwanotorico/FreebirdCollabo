@@ -115,6 +115,21 @@ class LocalHistory:
         step.t_last = now
         self.redo_stack.clear()  # a new edit ends the redo chain, as everywhere else
 
+    def rename(self, old, new):
+        """Our object was renamed by the add-on itself (curve name clash): its Undo history follows it."""
+        steps = self.undo_stack + self.redo_stack + ([self.open] if self.open is not None else [])
+        for step in steps:
+            items = {}
+            for key, it in step.items.items():
+                if key[0] != "m" and key[1] == old:
+                    key = (key[0], new)
+                    it.key = key
+                items[key] = it
+            step.items = items
+        for kind in ("ob",):
+            if (kind, old) in self.touch:
+                self.touch[(kind, new)] = self.touch.pop((kind, old))
+
     @staticmethod
     def _splits(step, key, add, now):
         if add:

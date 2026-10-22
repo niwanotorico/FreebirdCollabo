@@ -15,6 +15,7 @@ import array
 import hashlib
 import json
 import os
+import sys
 import tempfile
 
 import bpy
@@ -1493,6 +1494,26 @@ def armature_bones(ob):
             items.append(_bone_item(b.name, b.head_local, b.tail_local, _roll_from_bone(b),
                                     b.parent.name if b.parent else None, b.use_connect))
     return _parents_first(items)
+
+
+def _freebird_stroke():
+    """Freebird's pen stroke in progress (freebird/tools/draw_stroke.py keeps it in curr_stroke), or None."""
+    mod = sys.modules.get("freebird.tools.draw_stroke")
+    if mod is None:
+        for name, m in list(sys.modules.items()):
+            if name.endswith(".tools.draw_stroke") and hasattr(m, "curr_stroke"):
+                mod = m
+                break
+    return getattr(mod, "curr_stroke", None) if mod is not None else None
+
+
+def is_freebird_drawing(ob):
+    """True while the local Freebird pen is drawing into this curve object (new stroke or "extend")."""
+    try:
+        cu = getattr(_freebird_stroke(), "cu", None)
+        return cu is not None and ob.data is not None and ob.data.as_pointer() == cu.as_pointer()
+    except Exception:
+        return False
 
 
 def local_mode():

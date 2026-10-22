@@ -146,6 +146,12 @@ class CollabSession:
         self._dirty_data = set()  # (datablock type, name) flagged by the depsgraph handler
         self._next_data_t = {}  # obj name -> earliest time the next obj_data may go out
         self._pending_data = {}  # obj name -> payload waiting until the object leaves local Edit Mode
+        # Freebird pen strokes are all named "pen" / "pen.001" / ... on every Blender, so two people drawing at the
+        # same time create DIFFERENT curves under the SAME name (Issue #12). The claimant with the smaller uid keeps
+        # the name; the other one renames its own stroke and re-announces it with "was".
+        self._origin = {}  # CURVE obj name -> uid that announced it (ours or a peer's)
+        self._muted = set()  # (obj name, uid): messages from a peer that lost a name clash, until its "was" obj_add
+        self._renamed_from = {}  # our curve's new name -> the clashing name it had (sent as "was")
         self._pending_parent = {}  # child name -> parent name not yet present
         self._bones_sent = {}  # armature obj name -> bone list last sent (for the change summary in the log)
         # skinning (Issue #6): vertex groups / weights / Armature modifiers ride inside the MESH payload
@@ -244,6 +250,9 @@ class CollabSession:
         self._dirty_data.clear()
         self._next_data_t.clear()
         self._pending_data.clear()
+        self._origin.clear()
+        self._muted.clear()
+        self._renamed_from.clear()
         self._pending_parent.clear()
         self._bones_sent.clear()
         self.skin_meta.clear()
@@ -444,6 +453,8 @@ class CollabSession:
         t = msg.get("t")
         if self._pending_scene is not None and t in SCENE_EDIT_TYPES:
             self._deferred.append(msg)
+            return
+        if self._muted and self._drop_muted(t, msg):
             return
         if t in SCENE_EDIT_TYPES:
             self._note_remote(t, msg)
@@ -674,7 +685,8 @@ class CollabSession:
             self.tracked[ob.name] = m
             try:
                 info = self._restore_info[ob.name] = self._object_info(ob)
-                self.history.record("o", ob.name, None, info, now)
+                if ob.name not in self._renamed_from:  # a curve renamed by a name clash already has its add in history
+                    self.history.record("o", ob.name, None, info, now)
             except Exception as e:
                 self._log_once(f"restore info failed for {ob.name}: {e}")
         removed = self.known - current
@@ -706,6 +718,9 @@ class CollabSession:
         self.skin_meta.pop(n, None)
         self._pending_mods.pop(n, None)
         self._restore_info.pop(n, None)
+        self._origin.pop(n, None)
+        self._renamed_from.pop(n, None)
+        self._muted = {k for k in self._muted if k[0] != n}
 
     def _send_obj_add(self, ob, m):
         payload = None
@@ -731,7 +746,13 @@ class CollabSession:
             self._log_once(f"materials for {ob.name}: {e}")
             mats = []
         parent = ob.parent.name if ob.parent else None
-        self._send(make("obj_add", name=ob.name, type=ob.type, payload=payload, m=m, parent=parent, mats=mats))
+        extra = {}
+        if ob.type == "CURVE":
+            self._origin[ob.name] = self.uid
+            was = self._renamed_from.pop(ob.name, None)
+            if was:
+                extra["was"] = was  # tells every peer our messages about `was` were about this curve, not theirs
+        self._send(make("obj_add", name=ob.name, type=ob.type, payload=payload, m=m, parent=parent, mats=mats, **extra))
         if ob.type == "ARMATURE" and ob.pose is not None:
             # an armature that is already posed when first seen (duplicated from a posed rig, posed within the same
             # tick): an empty baseline makes the next pose check send every bone once, right after this obj_add
@@ -1229,7 +1250,9 @@ class CollabSession:
             return
         payload = msg["payload"]
         if self._editing_data_locally(ob):
-            if name not in self._pending_data:
+            if name not in self._pending_data and ob.type == "CURVE":
+                _log(f"CURVE data for {name} held: the Freebird pen is drawing into it; applied when the stroke ends")
+            elif name not in self._pending_data:
                 _log(f"{payload.get('type')} data for {name} held: local mode is {object_data.local_mode()} "
                      f"(active {getattr(bpy.context.view_layer.objects.active, 'name', None)}); applied when back in Object / Pose Mode")
             self._pending_data[name] = payload  # apply once the local user leaves the data-editing mode
@@ -1242,6 +1265,8 @@ class CollabSession:
             return ob.mode != "OBJECT"  # Edit / Weight Paint / Sculpt...: a rebuild under the user's brush is not safe
         if ob.type == "GREASEPENCIL":
             return ob.mode != "OBJECT"
+        if ob.type == "CURVE":  # Freebird holds the spline it is drawing: rebuilding it crashes the stroke end (Issue #12)
+            return object_data.is_freebird_drawing(ob)
         if ob.type == "ARMATURE":  # bones can only be written from Edit Mode: wait until we can borrow the view layer
             return ob.mode == "EDIT" or not object_data.armature_editable()
         return False
@@ -1305,7 +1330,7 @@ class CollabSession:
                 del self._pending_data[name]
             elif not self._editing_data_locally(ob):
                 payload = self._pending_data.pop(name)
-                if ob.type in ("ARMATURE", "MESH") and self._changed_locally(ob):
+                if ob.type in ("ARMATURE", "MESH", "CURVE") and self._changed_locally(ob):
                     # both sides edited the same datablock (bones / geometry / weights): the edit that finished last
                     # (ours) wins and goes out now, instead of the remote state silently burying it (the peer applies
                     # ours, so both end up equal)
@@ -1329,6 +1354,58 @@ class CollabSession:
             _set_world_matrix(ob, _list_to_mat(vals))
             self.tracked[name] = vals  # echo suppression
 
+    def _curve_clash(self, ob, name, frm):
+        """A peer announces a CURVE under a name a different curve already has here (two Freebird pens both made
+        "pen.003"). Returns "upsert" (same object / no clash), "ignore" (the sender lost: drop its messages about
+        this name until it re-announces under a new name) or "moved" (our own stroke lost: it was renamed and the
+        sender's curve is to be created under the name)."""
+        if name not in self.known:
+            # our brand-new stroke, not announced yet: no peer has it, so give the name up quietly
+            self._move_curve_aside(ob, name)
+            return "moved"
+        owner = self._origin.get(name)
+        if owner is None or owner == frm:
+            return "upsert"
+        if str(frm) > str(owner):  # same rule on every Blender: the smaller uid keeps the name
+            self._muted.add((name, frm))
+            _log(f"curve name clash on {name}: kept {owner}'s, {frm} will rename its own")
+            return "ignore"
+        self._muted.add((name, owner))
+        _log(f"curve name clash on {name}: {frm}'s takes the name, {owner}'s {'is renamed here' if owner == self.uid else 'will be renamed'}")
+        if owner == self.uid:
+            self._move_curve_aside(ob, name)
+            return "moved"
+        return "upsert"  # between two other peers: the winner's curve replaces the loser's under the name
+
+    def _move_curve_aside(self, ob, name):
+        new = name
+        i = 1
+        while new in bpy.data.objects:
+            new = f"{name}.c{i:02d}"
+            i += 1
+        ob.name = new  # Freebird keeps its stroke by reference, never by name: renaming mid-stroke is safe
+        self._renamed_from[new] = name
+        self.known.discard(name)  # the next scan announces our curve under its new name (with "was")
+        self._pending_data.pop(name, None)
+        self.data_digest.pop(name, None)
+        self.history.rename(name, new)
+        _log(f"curve name clash: our {name} renamed to {new}")
+
+    def _drop_muted(self, t, msg):
+        frm = msg.get("from")
+        if t == "xform":
+            objs = msg.get("objs") or {}
+            for name in [n for n in objs if (n, frm) in self._muted]:
+                del objs[name]
+            return not objs
+        if t in ("obj_data", "obj_mats", "pose"):
+            return (msg.get("name"), frm) in self._muted
+        if t == "obj_del":
+            names = msg.get("names") or []
+            msg["names"] = [n for n in names if (n, frm) not in self._muted]
+            return not msg["names"]
+        return False
+
     def _apply_obj_add(self, msg):
         name = msg["name"]
         payload = msg.get("payload")
@@ -1336,16 +1413,25 @@ class CollabSession:
             mesh = msg.get("mesh")
             payload = {"type": "MESH", "data": {"v": mesh["v"], "e": [], "f": mesh["f"]}} if mesh else \
                 {"type": "EMPTY", "data": {"display_type": "CUBE", "display_size": 0.2}}
+        frm = msg.get("from")
+        if msg.get("was") and frm:
+            self._muted.discard((msg["was"], frm))  # that peer's clash is settled: its later messages are real edits
         ob = bpy.data.objects.get(name)
         in_scene = ob is not None and name in bpy.context.scene.objects
         if ob is not None and not in_scene:
             # an orphan (deleted earlier, or left over from a previous import) squats on the name: move it aside
             ob.name = name + ".orphan"
             ob = None
+        if ob is not None and ob.type == "CURVE" and payload.get("type") == "CURVE" and frm:
+            verdict = self._curve_clash(ob, name, frm)
+            if verdict == "ignore":
+                return
+            if verdict == "moved":
+                ob = None
         if ob is not None:  # already here (e.g. both sides imported the same asset): upsert instead of ignoring
             if ob.type == payload["type"] and not payload.get("placeholder"):
-                if ob.type == "ARMATURE":
-                    self._apply_obj_data({"name": name, "payload": payload})  # may wait for local Edit Mode to end
+                if ob.type in ("ARMATURE", "CURVE"):
+                    self._apply_obj_data({"name": name, "payload": payload})  # may wait for local Edit Mode / a stroke to end
                 else:
                     self._apply_payload(ob, payload)
         else:
@@ -1373,6 +1459,8 @@ class CollabSession:
         _set_world_matrix(ob, _list_to_mat(msg["m"]))
         self.tracked[name] = msg["m"]
         self.known.add(name)
+        if ob.type == "CURVE" and frm:
+            self._origin[name] = frm
         self.data_digest[name] = None if payload.get("placeholder") else object_data.quick_digest(ob)
         self._dirty.discard(name)
         if ob.type == "MESH" and not payload.get("placeholder"):
