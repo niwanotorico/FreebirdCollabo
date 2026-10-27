@@ -65,11 +65,13 @@ def quick_digest(ob):
         me.polygons.foreach_get("loop_total", lt)
         mi = array.array("i", bytes(np * 4))
         me.polygons.foreach_get("material_index", mi)
+        sm = array.array("b", bytes(np))
+        me.polygons.foreach_get("use_smooth", sm)
         # skinning (Issue #6): vertex group names + armature modifiers (cheap) and the weights (a Python loop over
         # the vertices: ~2 ms per 1000 vertices; only meshes flagged dirty / being painted get here)
         skin = json.dumps(skin_meta(ob), separators=(",", ":")) if (ob.vertex_groups or ob.modifiers) else ""
         weights = json.dumps(_weights(ob, me), separators=(",", ":")) if ob.vertex_groups else ""
-        return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes(), skin, weights)
+        return _digest_bytes(nv, nl, np, co.tobytes(), li.tobytes(), lt.tobytes(), mi.tobytes(), sm.tobytes(), skin, weights)
     if kind == "GREASEPENCIL":
         return _grease_pencil_digest(ob.data)
     if kind == "ARMATURE":
@@ -82,6 +84,31 @@ def quick_digest(ob):
 # ----------------------------------------------------------------------
 # serialize
 # ----------------------------------------------------------------------
+def _smooth_flags(me):
+    """Shade Smooth / Flat per face (Issue #14): 1 = all smooth, 0 = all flat, else a "0101..." string.
+    None for a mesh without faces."""
+    n = len(me.polygons)
+    if not n:
+        return None
+    buf = array.array("b", bytes(n))
+    me.polygons.foreach_get("use_smooth", buf)
+    total = sum(buf)
+    if total == n:
+        return 1
+    if total == 0:
+        return 0
+    return "".join("1" if b else "0" for b in buf)
+
+
+def _apply_smooth(me, sm):
+    if sm == 1:
+        me.shade_smooth()
+    elif sm == 0:
+        me.shade_flat()
+    elif isinstance(sm, str) and len(sm) == len(me.polygons):
+        me.polygons.foreach_set("use_smooth", array.array("b", (c == "1" for c in sm)))
+
+
 def _mesh_data(me, limit=MAX_MESH_VERTS, ob=None):
     if len(me.vertices) > limit:
         return None
@@ -91,6 +118,9 @@ def _mesh_data(me, limit=MAX_MESH_VERTS, ob=None):
         "f": [list(p.vertices) for p in me.polygons],
         "mi": [p.material_index for p in me.polygons] if any(p.material_index for p in me.polygons) else [],
     }
+    sm = _smooth_flags(me)
+    if sm is not None:
+        data["sm"] = sm
     uv = me.uv_layers.active
     if uv is not None and len(me.loops) and len(uv.data) == len(me.loops):  # uv.data is empty while in Edit Mode
         buf = array.array("f", bytes(len(me.loops) * 8))
@@ -239,7 +269,8 @@ def serialize(ob, limit=MAX_MESH_VERTS):
         cu = ob.data
         splines = []
         for sp in cu.splines:
-            item = {"type": sp.type, "cyclic": sp.use_cyclic_u, "order_u": sp.order_u, "resolution_u": sp.resolution_u}
+            item = {"type": sp.type, "cyclic": sp.use_cyclic_u, "order_u": sp.order_u, "resolution_u": sp.resolution_u,
+                    "sm": int(sp.use_smooth)}
             if sp.type == "BEZIER":
                 item["points"] = [
                     {"co": _vec(p.co), "l": _vec(p.handle_left), "r": _vec(p.handle_right),
@@ -328,8 +359,12 @@ def apply(ob, payload):
         keep_w = None
         if "vg" not in data and ob.vertex_groups:  # pre-0.10 peer: clear_geometry drops the weights, so keep ours
             keep_w = (len(me.vertices), [g.name for g in ob.vertex_groups], _weights(ob, me))
+        keep_sm = None if "sm" in data else _smooth_flags(me)  # older peer: keep our shading if the faces match
         me.clear_geometry()
         me.from_pydata(data["v"], data.get("e", []), data["f"])
+        sm = data.get("sm", keep_sm)
+        if sm is not None:
+            _apply_smooth(me, sm)
         if keep_uv and len(keep_uv[1]) == len(me.loops) * 2:
             layer = me.uv_layers.new(name=keep_uv[0])
             layer.data.foreach_set("uv", keep_uv[1])
@@ -371,6 +406,8 @@ def apply(ob, payload):
                     p.co, p.weight = v["co"], v["w"]
                 sp.order_u = min(item["order_u"], max(len(pts), 1))
             sp.use_cyclic_u = item["cyclic"]
+            if "sm" in item:
+                sp.use_smooth = bool(item["sm"])
             sp.resolution_u = item["resolution_u"]
     elif kind == "FONT":
         for k, v in data.items():

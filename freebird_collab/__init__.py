@@ -315,6 +315,35 @@ class COLLAB_OT_copy_code(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def clean_join_text(text, mode):
+    """What to put in the Code / Host IP box from pasted text. RELAY: the 6-letter room code, even when the
+    paste is a whole chat line ("room: K7XQ2M !"), else the trimmed text; DIRECT: the trimmed text."""
+    import re
+
+    text = (text or "").strip()
+    if mode == "RELAY":
+        codes = [t.upper() for t in re.findall(r"[A-Za-z0-9]+", text) if len(t) == 6]
+        if codes:
+            return codes[-1]
+    return text.splitlines()[0].strip() if text else ""
+
+
+class COLLAB_OT_paste_code(bpy.types.Operator):
+    bl_idname = "collab.paste_code"
+    bl_label = "Paste"
+    bl_description = "Paste the Room Code (or Host IP) from the clipboard"
+
+    def execute(self, context):
+        wm = context.window_manager
+        value = clean_join_text(wm.clipboard, _prefs().mode)
+        if not value:
+            self.report({"WARNING"}, "Clipboard is empty")
+            return {"CANCELLED"}
+        wm.collab_join_target = value
+        self.report({"INFO"}, f"Pasted {value}")
+        return {"FINISHED"}
+
+
 # ----------------------------------------------------------------------
 # panel
 # ----------------------------------------------------------------------
@@ -357,7 +386,9 @@ class COLLAB_PT_panel(bpy.types.Panel):
         if not s.active:
             layout.operator("collab.create_room", icon="WORLD")
             box = layout.box()
-            box.prop(context.window_manager, "collab_join_target", text="Code" if p.mode == "RELAY" else "Host IP")
+            row = box.row(align=True)
+            row.prop(context.window_manager, "collab_join_target", text="Code" if p.mode == "RELAY" else "Host IP")
+            row.operator("collab.paste_code", text="", icon="PASTEDOWN")
             box.operator("collab.join_room", icon="LINKED")
             if s.error:
                 layout.label(text=s.error, icon="ERROR")
@@ -453,6 +484,7 @@ classes = (
     COLLAB_OT_leave_room,
     COLLAB_OT_save_master,
     COLLAB_OT_copy_code,
+    COLLAB_OT_paste_code,
     COLLAB_OT_undo,
     COLLAB_OT_redo,
     COLLAB_OT_check_relay,
