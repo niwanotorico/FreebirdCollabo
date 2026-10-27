@@ -11,7 +11,7 @@ GitHubの「Code → Download ZIP」は配布用ZIPではありません。
 
 [English README](README.md)
 
-> ⚠️ **Public Alpha（v0.12.1）** — まだ開発初期の公開α版です。重要な `.blend` ファイルは必ずバックアップを取ってから使ってください。
+> ⚠️ **Public Alpha（v0.13.0）** — まだ開発初期の公開α版です。重要な `.blend` ファイルは必ずバックアップを取ってから使ってください。
 
 FreebirdCollabo は、1 つの Blender シーンを複数の Blender 間でリアルタイムに同期する Blender アドオンです。
 
@@ -40,14 +40,14 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 - 相手の **選択オブジェクト / 使用中ツール** をデスクトップ 3D ビューに表示。Freebird XR 使用時は **頭（HMD）/ 左右の手 / ポインターのレイ** も VR ビューとデスクトップの両方に描画
 - UI は `COLLAB` パネル（N パネル）の **Create Room / Join Room / Leave Room** だけ。Freebird XR 使用時は VR メニューからも操作できる
 
-## 同期している機能（v0.12.1）
+## 同期している機能（v0.13.0）
 
 すべて Blender 5.2 の実機で同期を確認済みです。
 
 | 分類 | 内容 |
 | --- | --- |
 | オブジェクト | Transform（変更分のみ 30Hz）、新規作成 / 削除、Duplicate、Rename、parent / child 階層 |
-| メッシュ | Mesh Edit（頂点 / 面。Edit Mode 中もリアルタイム）、UV |
+| メッシュ | Mesh Edit（頂点 / 面。Edit Mode 中もリアルタイム）、UV、Shade Smooth / Flat（面ごと） |
 | その他のデータ | Curve、Text、Light、Camera、Empty の内容変更（変更があった物だけ、最大 5Hz、サイズ連動の帯域制限あり） |
 | Grease Pencil | 新規作成 / 描画 / 編集（レイヤー・フレーム・ストローク・点・ソリッド材質） |
 | マテリアル | 新規作成 / 削除 / Rename、オブジェクトへの割り当て・スロット、Principled BSDF の主要入力（Base Color / Metallic / Roughness / Alpha / IOR / Emission / Coat / Sheen / Transmission ほか）、Render Method、Backface Culling、Viewport Display |
@@ -97,7 +97,7 @@ Gravity Sketch の Co-Creation のように、「同じ3D空間を一緒につ�
 - **Direct (IP address)**：Connection を Direct にすると Relay を使わず、ホストがポート 7788 で待ち受ける。ゲストは Code 欄の代わりに `Host IP` 欄へ IP（LAN や Tailscale 等の VPN）を入力。LAN / デバッグ用
 - **v0.11.0 以前からのアップデート**：Relay URL を自分で入力していた場合は、アップデート後もその値がそのまま使われる。既定の Relay にそろえたいときは ↺ ボタンを押す
 - **v0.12.0 と v0.11.x の混在**：通信の形式は変えていないので接続はできる。ただし v0.11.x 以前の人が Undo すると Blender の Undo（ファイル全体）になり、ほかの人の作業も巻き戻ってしまう。**全員 v0.12.0 にそろえるのがおすすめ**
-- **古い版との混在**：v0.11.0 以前のアドオンには Relay URL の既定値が無い。相手が古い版のままなら、相手のアドオンも最新版（v0.12.1）に更新してもらう（混在しても接続はできるが、古い版では Relay URL の手入力が必要）
+- **古い版との混在**：v0.11.0 以前のアドオンには Relay URL の既定値が無い。相手が古い版のままなら、相手のアドオンも最新版（v0.13.0）に更新してもらう（混在しても接続はできるが、古い版では Relay URL の手入力が必要）
 
 ## 使い方
 
@@ -130,7 +130,7 @@ FreebirdCollabo/
 │   ├─ link.py               TCP クライアント（受信スレッド → メインスレッドへキュー）
 │   ├─ protocol.py           メッセージ定義（4byte 長 + JSON）
 │   └─ ws.py                 WebSocket 実装（stdlib のみ）— 無料 HTTP ホスティングに Relay を置くため
-├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.12.1。Preferences > Add-ons > Install from Disk でも入れられる）
+├─ freebird_collab_addon.zip  アドオンの配布用 zip（v0.13.0。Preferences > Add-ons > Install from Disk でも入れられる）
 ├─ freebird_plugin/
 │   └─ freebird_collab_menu.py   Freebird VR メニューに COLLAB ボタンを足すプラグイン（Freebird XR 使用時のみ）
 ├─ relay/collab_relay.py     中継サーバー（依存なし・TCP と WebSocket を同一ポートで自動判別）
