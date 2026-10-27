@@ -72,15 +72,31 @@ def _list_to_mat(vals):
     return Matrix([vals[0:4], vals[4:8], vals[8:12], vals[12:16]])
 
 
-def _world_matrix(ob):
+def _plain_child(ob):
+    """Parented to the object itself (not a bone / vertex) and not moved by constraints: its world matrix
+    is exactly parent world @ matrix_parent_inverse @ matrix_basis."""
+    return ob.parent_type == "OBJECT" and not ob.constraints
+
+
+def _world_matrix(ob, _depth_left=64):
     """Current world matrix without waiting for a depsgraph update (matrix_basis is
-    always fresh; matrix_world lags until the next evaluation)."""
-    return ob.matrix_basis if ob.parent is None else ob.matrix_world
+    always fresh; matrix_world lags until the next evaluation). For a child the chain is
+    rebuilt from the bases, so a parent moved in this very tick counts (Issue #13)."""
+    if ob.parent is None:
+        return ob.matrix_basis
+    if _depth_left <= 0 or not _plain_child(ob):
+        return ob.matrix_world
+    return _world_matrix(ob.parent, _depth_left - 1) @ ob.matrix_parent_inverse @ ob.matrix_basis
 
 
 def _set_world_matrix(ob, m):
     if ob.parent is None:
         ob.matrix_basis = m
+    elif _plain_child(ob):
+        # matrix_world = m would solve against the parent's matrix_world, which still holds the parent's
+        # position from before this tick when the parent was moved just now (same xform message): the child
+        # then lands off by the parent's last move and drifts while a group is being shaken (Issue #13)
+        ob.matrix_basis = (_world_matrix(ob.parent) @ ob.matrix_parent_inverse).inverted() @ m
     else:
         ob.matrix_world = m
 
@@ -1347,10 +1363,14 @@ class CollabSession:
         return ob.name in self.data_digest and digest is not None and digest != self.data_digest.get(ob.name)
 
     def _apply_xform(self, objs):
+        items = []
         for name, vals in objs.items():
             ob = bpy.data.objects.get(name)
             if ob is None or len(vals) != 16:
                 continue
+            items.append((_depth(ob), name, ob, vals))
+        items.sort(key=lambda t: t[0])  # parents first: a child is placed against its parent's NEW position
+        for _, name, ob, vals in items:
             _set_world_matrix(ob, _list_to_mat(vals))
             self.tracked[name] = vals  # echo suppression
 
